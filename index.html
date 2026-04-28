@@ -1224,7 +1224,7 @@ const createAppInstance = () => createApp({
                 ctx.globalCompositeOperation = 'source-over';
             }
 
-            renderOnionSkin();
+            await renderOnionSkin();
             renderSelectionOverlay();
         };
 
@@ -2143,6 +2143,7 @@ const createAppInstance = () => createApp({
 
             pointerUp: (e, opts = {}) => {
                 const forcePos = opts.forcePos || null;
+                const wasRightClick = session.isRightClick;
                 session.isRightClick = false;
                 pendingStroke = null;
                 const capturedId = session.activePointerId;
@@ -2188,7 +2189,7 @@ const createAppInstance = () => createApp({
                         session.selection.rect = null; // Is lasso
                         createFloatingLayer();
                     }
-                } else if (['pen', 'eraser'].includes(session.tool) || session.isRightClick) { // Also save on right click finish
+                } else if (['pen', 'eraser'].includes(session.tool) || wasRightClick) { // Also save on right click finish
                     const pos = forcePos ? forcePos : getPointerPos(e);
                     const ctx = getCtx(session.currentLayerId);
                     if (ctx && pos) {
@@ -2196,10 +2197,10 @@ const createAppInstance = () => createApp({
                         ctx.lineCap = 'round';
                         ctx.lineJoin = 'round';
                         ctx.strokeStyle = session.colors.primary;
-                        const size = (session.tool === 'eraser' || session.isRightClick) ? session.brush.eraserSize : session.brush.penSize;
+                        const size = (session.tool === 'eraser' || wasRightClick) ? session.brush.eraserSize : session.brush.penSize;
                         const p = settings.pressureSensitivity ? (e.pressure || 0.5) : 0.5;
                         ctx.lineWidth = size * (p + 0.5);
-                        ctx.globalCompositeOperation = (session.tool === 'eraser' || session.isRightClick) ? 'destination-out' : 'source-over';
+                        ctx.globalCompositeOperation = (session.tool === 'eraser' || wasRightClick) ? 'destination-out' : 'source-over';
 
                         if (!lastPoint) {
                             ctx.beginPath();
@@ -2689,9 +2690,9 @@ const createAppInstance = () => createApp({
                 saveCurrentLayerToState();
             },
 
-            confirmNewProject() {
+            async confirmNewProject() {
                 showNewProjectModal.value = false;
-                actions.initProject({
+                await actions.initProject({
                     width: newProjectForm.width,
                     height: newProjectForm.height,
                     fps: newProjectForm.fps,
