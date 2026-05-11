@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>teani</title>
+    <title>tegani</title>
     
     <!-- Libraries -->
     <script src="./vendor/vue.global.js"></script>
@@ -379,7 +379,7 @@
 <div id="app">
     <!-- Header -->
     <header class="header">
-        <div class="header-title"><i class="fas fa-film"></i> teani </div>
+        <div class="header-title"><i class="fas fa-film"></i> tegani </div>
         <div class="menu-item" @click="openNewProjectModal"><i class="fas fa-file"></i> New</div>
         <div class="menu-item" @click="actions.saveProject()"><i class="fas fa-save"></i> Save</div>
         <div class="menu-separator"></div>
@@ -742,7 +742,7 @@ const {
 } = Vue;
 
 /* --- Constants & Utils --- */
-const DB_NAME = 'teaniDB';
+const DB_NAME = 'teganiDB';
 const DB_VERSION = 1; // Incremented for schema change
 const DEFAULT_PALETTE = [
     '#000000', '#ffffff', '#7f7f7f', '#c3c3c3', '#880015', '#b97a57',
@@ -2420,7 +2420,7 @@ const createAppInstance = () => createApp({
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement('a');
                 a.href = url;
-                a.download = `teani_project_${Date.now()}.json`;
+                a.download = `tegani_project_${Date.now()}.json`;
                 a.click();
                 URL.revokeObjectURL(url);
             },
@@ -2902,7 +2902,7 @@ const createAppInstance = () => createApp({
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement('a');
                 a.href = url;
-                a.download = `teani_${Date.now()}.png`;
+                a.download = `tegani_${Date.now()}.png`;
                 a.click();
                 URL.revokeObjectURL(url);
             } catch (err) {
@@ -2941,7 +2941,7 @@ const createAppInstance = () => createApp({
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement('a');
                 a.href = url;
-                a.download = `teani_frames_${Date.now()}.zip`;
+                a.download = `tegani_frames_${Date.now()}.zip`;
                 a.click();
                 URL.revokeObjectURL(url);
             } catch (err) {
@@ -2987,7 +2987,7 @@ const createAppInstance = () => createApp({
                 const url = URL.createObjectURL(output);
                 const a = document.createElement('a');
                 a.href = url;
-                a.download = `teani_${Date.now()}.webm`;
+                a.download = `tegani_${Date.now()}.webm`;
                 a.click();
                 URL.revokeObjectURL(url);
             } catch (err) {
