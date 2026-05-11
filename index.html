@@ -12,6 +12,7 @@
     <script src="./vendor/pako.min.js"></script>
     <script src="./vendor/UPNG.min.js"></script>
     <script src="./vendor/webm-writer-0.3.0.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
 
     <style>
         :root {
@@ -371,42 +372,6 @@
         /* Utils */
         .hidden { display: none !important; }
         input[type="color"] { opacity: 0; position: absolute; top: 0; left: 0; width: 100%; height: 100%; cursor: pointer; }
-
-        /* Local icon fallback matching the Font Awesome class names used in the markup. */
-        .fas::before, .far::before {
-            display: inline-block;
-            width: 1em;
-            text-align: center;
-            font-style: normal;
-            font-weight: 700;
-            line-height: 1;
-        }
-        .fa-film::before { content: "🎞"; }
-        .fa-file::before { content: "□"; }
-        .fa-save::before { content: "▣"; }
-        .fa-file-video::before { content: "▤"; }
-        .fa-file-archive::before { content: "▥"; }
-        .fa-file-export::before { content: "⇩"; }
-        .fa-file-import::before { content: "⇧"; }
-        .fa-cog::before { content: "⚙"; }
-        .fa-step-backward::before { content: "⏮"; }
-        .fa-play::before { content: "▶"; }
-        .fa-pause::before { content: "Ⅱ"; }
-        .fa-step-forward::before { content: "⏭"; }
-        .fa-layer-group::before { content: "▦"; }
-        .fa-square::before { content: "□"; }
-        .fa-draw-polygon::before { content: "◇"; }
-        .fa-arrows-alt::before { content: "↕"; }
-        .fa-pen::before { content: "✎"; }
-        .fa-eraser::before { content: "⌫"; }
-        .fa-fill-drip::before { content: "▰"; }
-        .fa-eye-dropper::before { content: "◉"; }
-        .fa-eye::before { content: "◌"; }
-        .fa-exchange-alt::before { content: "⇄"; }
-        .fa-trash-alt::before { content: "×"; }
-        .fa-spinner::before { content: "◌"; }
-        .fa-spin::before { animation: spin 1s linear infinite; }
-        @keyframes spin { to { transform: rotate(360deg); } }
     </style>
 </head>
 <body>
