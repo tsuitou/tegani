@@ -12,7 +12,6 @@
     <script src="./vendor/pako.min.js"></script>
     <script src="./vendor/UPNG.min.js"></script>
     <script src="./vendor/webm-writer-0.3.0.js"></script>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
 
     <style>
         :root {
@@ -372,6 +371,42 @@
         /* Utils */
         .hidden { display: none !important; }
         input[type="color"] { opacity: 0; position: absolute; top: 0; left: 0; width: 100%; height: 100%; cursor: pointer; }
+
+        /* Local icon fallback matching the Font Awesome class names used in the markup. */
+        .fas::before, .far::before {
+            display: inline-block;
+            width: 1em;
+            text-align: center;
+            font-style: normal;
+            font-weight: 700;
+            line-height: 1;
+        }
+        .fa-film::before { content: "🎞"; }
+        .fa-file::before { content: "□"; }
+        .fa-save::before { content: "▣"; }
+        .fa-file-video::before { content: "▤"; }
+        .fa-file-archive::before { content: "▥"; }
+        .fa-file-export::before { content: "⇩"; }
+        .fa-file-import::before { content: "⇧"; }
+        .fa-cog::before { content: "⚙"; }
+        .fa-step-backward::before { content: "⏮"; }
+        .fa-play::before { content: "▶"; }
+        .fa-pause::before { content: "Ⅱ"; }
+        .fa-step-forward::before { content: "⏭"; }
+        .fa-layer-group::before { content: "▦"; }
+        .fa-square::before { content: "□"; }
+        .fa-draw-polygon::before { content: "◇"; }
+        .fa-arrows-alt::before { content: "↕"; }
+        .fa-pen::before { content: "✎"; }
+        .fa-eraser::before { content: "⌫"; }
+        .fa-fill-drip::before { content: "▰"; }
+        .fa-eye-dropper::before { content: "◉"; }
+        .fa-eye::before { content: "◌"; }
+        .fa-exchange-alt::before { content: "⇄"; }
+        .fa-trash-alt::before { content: "×"; }
+        .fa-spinner::before { content: "◌"; }
+        .fa-spin::before { animation: spin 1s linear infinite; }
+        @keyframes spin { to { transform: rotate(360deg); } }
     </style>
 </head>
 <body>
@@ -842,21 +877,16 @@ function generateUUID() {
 // IndexedDB Helper
 const openDb = () => idb.openDB(DB_NAME, DB_VERSION, {
     upgrade(db, oldVersion, newVersion, transaction) {
-        // Schema migration: Clear old stores to avoid conflicts
-        if (db.objectStoreNames.contains('projects')) {
-            db.deleteObjectStore('projects');
+        if (!db.objectStoreNames.contains('projects')) {
+            db.createObjectStore('projects', {
+                keyPath: 'id'
+            });
         }
-        if (db.objectStoreNames.contains('frames')) {
-            db.deleteObjectStore('frames');
+        if (!db.objectStoreNames.contains('frames')) {
+            db.createObjectStore('frames', {
+                keyPath: 'id'
+            });
         }
-
-        // Create new stores
-        db.createObjectStore('projects', {
-            keyPath: 'id'
-        });
-        db.createObjectStore('frames', {
-            keyPath: 'id'
-        });
 
         if (!db.objectStoreNames.contains('meta')) {
             db.createObjectStore('meta');
@@ -1030,6 +1060,17 @@ const createAppInstance = () => createApp({
             });
         };
 
+        const loadImageOrNull = (src) => new Promise(resolve => {
+            if (!src) {
+                resolve(null);
+                return;
+            }
+            const img = new Image();
+            img.onload = () => resolve(img);
+            img.onerror = () => resolve(null);
+            img.src = src;
+        });
+
         // Helper to generate thumbnail
         const generateThumbnail = async (frame) => {
             const MAX_SIZE = 100;
@@ -1053,10 +1094,8 @@ const createAppInstance = () => createApp({
             // Draw background
             const bgSrc = frame.layers[0];
             if (bgSrc) {
-                const img = new Image();
-                img.src = bgSrc;
-                await new Promise(r => img.onload = r);
-                ctx.drawImage(img, 0, 0, w, h);
+                const img = await loadImageOrNull(bgSrc);
+                if (img) ctx.drawImage(img, 0, 0, w, h);
             }
 
 
@@ -1065,10 +1104,8 @@ const createAppInstance = () => createApp({
             for (let i = 1; i < project.layers.length; i++) {
                 const l = project.layers[i];
                 if (l.type === 'draw' && l.visible && frame.layers[l.id]) {
-                    const img = new Image();
-                    img.src = frame.layers[l.id];
-                    await new Promise(r => img.onload = r);
-                    ctx.drawImage(img, 0, 0, w, h);
+                    const img = await loadImageOrNull(frame.layers[l.id]);
+                    if (img) ctx.drawImage(img, 0, 0, w, h);
                 }
             }
             return c.toDataURL('image/jpeg', 0.8);
@@ -1113,7 +1150,10 @@ const createAppInstance = () => createApp({
             return onionBuffer;
         };
         const getTempCtx = () => canvasTemp.value?.getContext('2d');
-        const clearCanvas = (ctx) => ctx.clearRect(0, 0, project.meta.width, project.meta.height);
+        const clearCanvas = (ctx) => {
+            if (!ctx) return;
+            ctx.clearRect(0, 0, project.meta.width, project.meta.height);
+        };
 
         const normalizeFrame = (frame) => {
             if (!frame) return;
@@ -1467,6 +1507,7 @@ const createAppInstance = () => createApp({
 
             const w = project.meta.width;
             const h = project.meta.height;
+            if (startX < 0 || startY < 0 || startX >= w || startY >= h) return;
             const imgData = ctx.getImageData(0, 0, w, h);
             const data = imgData.data;
 
@@ -1862,10 +1903,8 @@ const createAppInstance = () => createApp({
                     offCtx.fillStyle = src;
                     offCtx.fillRect(0, 0, off.width, off.height);
                 } else {
-                    const img = new Image();
-                    img.src = src;
-                    await new Promise(r => img.onload = r);
-                    offCtx.drawImage(img, 0, 0);
+                    const img = await loadImageOrNull(src);
+                    if (img) offCtx.drawImage(img, 0, 0);
                 }
             }
 
@@ -1971,7 +2010,7 @@ const createAppInstance = () => createApp({
                 } catch (_) {}
             },
 
-            handleCanvasPointerDown: (e) => {
+            handleCanvasPointerDown: async (e) => {
                 if (session.isPlaying) return;
                 session.activePointerId = e.pointerId;
                 try {
@@ -2013,7 +2052,7 @@ const createAppInstance = () => createApp({
 
                 // Selection Tool Logic (Left click only)
                 if (!session.isRightClick && (session.tool === 'select-rect' || session.tool === 'select-lasso')) {
-                    if (session.selection.active) anchorSelection(); // Anchor previous
+                    if (session.selection.active) await anchorSelection(); // Anchor previous
                     session.selection.path = [{
                         x,
                         y
@@ -2031,7 +2070,7 @@ const createAppInstance = () => createApp({
 
                 // Drawing Tools
                 if (session.tool === 'bucket' && !session.isRightClick) {
-                    if (session.selection.active) anchorSelection();
+                    if (session.selection.active) await anchorSelection();
                     floodFill(Math.floor(x), Math.floor(y), session.colors.primary);
                     session.isDrawing = false;
                     return;
@@ -2040,6 +2079,10 @@ const createAppInstance = () => createApp({
                 if (session.tool === 'eyedropper' && !session.isRightClick) {
                     // Simple pick
                     const ctx = getCtx(session.currentLayerId);
+                    if (!ctx || x < 0 || y < 0 || x >= project.meta.width || y >= project.meta.height) {
+                        session.isDrawing = false;
+                        return;
+                    }
                     const p = ctx.getImageData(Math.floor(x), Math.floor(y), 1, 1).data;
                     // Convert to hex
                     const hex = "#" + ((1 << 24) + (p[0] << 16) + (p[1] << 8) + p[2]).toString(16).slice(1);
@@ -2050,7 +2093,7 @@ const createAppInstance = () => createApp({
 
                 // Pen/Eraser
                 // Float layer anchor if drawing outside? Yes.
-                if (session.selection.active) anchorSelection();
+                if (session.selection.active) await anchorSelection();
 
                 pendingStroke = { x, y, pressure: e.pressure };
                 scheduleSmoothingTick();
@@ -2259,7 +2302,7 @@ const createAppInstance = () => createApp({
                 };
                 session.selection.dirty = false;
                 ensureFrame(0);
-                actions.addFrame(false);
+                await actions.addFrame(false);
                 session.currentFrameIndex = 0;
                 await nextTick();
                 renderCurrentFrame();
@@ -2272,8 +2315,9 @@ const createAppInstance = () => createApp({
                 };
             },
 
-            addFrame(copy = false, insertMode = 'after-current') {
+            async addFrame(copy = false, insertMode = 'after-current') {
                 if (session.isPlaying) return;
+                await commitFloatingSelection();
                 let newFrame;
                 if (copy && currentFrame.value) {
                     ensureFrame(session.currentFrameIndex);
@@ -2297,13 +2341,14 @@ const createAppInstance = () => createApp({
                     ? project.frames.length
                     : Math.min(project.frames.length, session.currentFrameIndex + 1);
                 project.frames.splice(insertAt, 0, newFrame);
-                actions.gotoFrame(insertAt);
+                await actions.gotoFrame(insertAt);
                 //triggerAutoSave();
             },
 
-            deleteFrame(idx) {
+            async deleteFrame(idx) {
                 if (session.isPlaying) return;
                 if (project.frames.length <= 1) return;
+                await commitFloatingSelection();
                 const removed = project.frames.splice(idx, 1);
                 if (removed[0]) clearFrameHistory(removed[0].id);
                 if (session.currentFrameIndex >= project.frames.length) {
@@ -2349,14 +2394,16 @@ const createAppInstance = () => createApp({
             },
 
             async saveProject() {
+                await commitFloatingSelection();
                 const db = await dbPromise;
                 const rawProject = toRaw(project);
                 const rawSettings = toRaw(settings);
                 const rawSession = toRaw(session);
 
                 const frames = rawProject.frames;
+                const { settings: _projectSettings, sessionState: _projectSessionState, ...projectData } = rawProject;
                 const meta = {
-                    ...rawProject,
+                    ...projectData,
                     frames: frames.map(f => f.id),
                     settings: rawSettings,
                     sessionState: {
@@ -2388,8 +2435,20 @@ const createAppInstance = () => createApp({
                 frameContext.index = idx;
             },
 
-            saveJSON() {
-                const data = JSON.stringify(project, null, 2);
+            async saveJSON() {
+                await commitFloatingSelection();
+                const rawProject = toRaw(project);
+                const rawSettings = toRaw(settings);
+                const rawSession = toRaw(session);
+                const { settings: _projectSettings, sessionState: _projectSessionState, ...projectData } = rawProject;
+                const data = JSON.stringify({
+                    ...projectData,
+                    settings: rawSettings,
+                    sessionState: {
+                        colors: rawSession.colors,
+                        brush: rawSession.brush
+                    }
+                }, null, 2);
                 const blob = new Blob([data], {
                     type: 'application/json'
                 });
@@ -2398,6 +2457,7 @@ const createAppInstance = () => createApp({
                 a.href = url;
                 a.download = `teani_project_${Date.now()}.json`;
                 a.click();
+                URL.revokeObjectURL(url);
             },
 
             loadJSON(event) {
@@ -2408,18 +2468,23 @@ const createAppInstance = () => createApp({
                 reader.onload = async (e) => {
                     try {
                         const loaded = JSON.parse(e.target.result);
-                        Object.assign(project, loaded);
+                        const {
+                            settings: loadedSettings,
+                            sessionState: loadedSessionState,
+                            ...loadedProject
+                        } = loaded;
+                        Object.assign(project, loadedProject);
 
                         // Restore settings/session from JSON
-                        if (loaded.settings) {
-                            Object.assign(settings, loaded.settings);
+                        if (loadedSettings) {
+                            Object.assign(settings, loadedSettings);
                         }
-                        if (loaded.sessionState) {
-                            if (loaded.sessionState.colors) Object.assign(session.colors, loaded.sessionState.colors);
-                            if (loaded.sessionState.brush) Object.assign(session.brush, loaded.sessionState.brush);
-                        } else if (loaded.settings?.backgroundColor) {
+                        if (loadedSessionState) {
+                            if (loadedSessionState.colors) Object.assign(session.colors, loadedSessionState.colors);
+                            if (loadedSessionState.brush) Object.assign(session.brush, loadedSessionState.brush);
+                        } else if (loadedSettings?.backgroundColor) {
                             // Legacy support
-                            settings.backgroundColor = loaded.settings.backgroundColor;
+                            settings.backgroundColor = loadedSettings.backgroundColor;
                         }
 
                         project.layers = project.layers.map(l => {
@@ -2522,12 +2587,12 @@ const createAppInstance = () => createApp({
                 saveCurrentLayerToState();
             },
 
-            paste() {
+            async paste() {
                 if (session.isPlaying) return;
                 if (!session.clipboard || session.clipboard.type !== 'image') return;
 
                 // If selection active, anchor it first
-                if (session.selection.active) anchorSelection();
+                await commitFloatingSelection();
 
                 recordHistory();
 
@@ -2559,7 +2624,7 @@ const createAppInstance = () => createApp({
                 const tempCtx = getTempCtx();
                 clearCanvas(tempCtx);
                 
-                setTool('move');
+                await setTool('move');
                 renderSelectionOverlay();
             },
 
@@ -2567,7 +2632,7 @@ const createAppInstance = () => createApp({
                 if (session.isPlaying) return;
                 const frame = ensureFrame(session.currentFrameIndex);
                 if (!frame) return;
-                if (session.selection.active) anchorSelection();
+                await commitFloatingSelection();
 
                 const w = project.meta.width;
                 const h = project.meta.height;
@@ -2625,8 +2690,9 @@ const createAppInstance = () => createApp({
                 session.dragOverIndex = null;
             },
 
-            handleDrop(e, idx) {
+            async handleDrop(e, idx) {
                 if (session.isPlaying) return;
+                await commitFloatingSelection();
                 const fromIdx = parseInt(e.dataTransfer.getData('text/plain'));
                 if (fromIdx === idx) return;
 
@@ -2638,8 +2704,9 @@ const createAppInstance = () => createApp({
                 renderCurrentFrame();
             },
 
-            insertEmptyFrame(idx) {
+            async insertEmptyFrame(idx) {
                 if (session.isPlaying) return;
+                await commitFloatingSelection();
                 const target = (idx ?? session.currentFrameIndex);
                 const frame = {
                     id: generateUUID(),
@@ -2663,9 +2730,10 @@ const createAppInstance = () => createApp({
                 frameContext.visible = false;
             },
 
-            pasteFrame(idx) {
+            async pasteFrame(idx) {
                 if (session.isPlaying) return;
                 if (!session.clipboard || session.clipboard.type !== 'frame') return;
+                await commitFloatingSelection();
                 const target = (idx ?? session.currentFrameIndex);
                 const cloned = JSON.parse(JSON.stringify(session.clipboard.data));
                 cloned.id = generateUUID();
@@ -2750,8 +2818,9 @@ const createAppInstance = () => createApp({
 
             // Separate metadata and frames
             const frames = rawProject.frames;
+            const { settings: _projectSettings, sessionState: _projectSessionState, ...projectData } = rawProject;
             const meta = {
-                ...rawProject,
+                ...projectData,
                 frames: frames.map(f => f.id), // Store IDs only in meta
                 // Persist settings and session state
                 settings: rawSettings,
@@ -2780,6 +2849,12 @@ const createAppInstance = () => createApp({
         const triggerAutoSave = () => {
             // Instant save when triggered, no debounce
             saveProjectSilent();
+        };
+
+        const commitFloatingSelection = async () => {
+            if (session.selection.active) {
+                await anchorSelection();
+            }
         };
 
         // --- Export ---
@@ -2836,6 +2911,7 @@ const createAppInstance = () => createApp({
 
         const exportAPNG = async () => {
             if (project.frames.length === 0) return;
+            await commitFloatingSelection();
             await showLoadingOverlay();
             try {
                 const bufs = [];
@@ -2874,6 +2950,7 @@ const createAppInstance = () => createApp({
 
         const exportZIP = async () => {
             if (project.frames.length === 0) return;
+            await commitFloatingSelection();
             await showLoadingOverlay();
             try {
                 const files = {};
@@ -2912,6 +2989,7 @@ const createAppInstance = () => createApp({
 
         const exportWebM = async () => {
             if (project.frames.length === 0) return;
+            await commitFloatingSelection();
             await showLoadingOverlay();
             try {
                 if (typeof WebMWriter === 'undefined') {
@@ -2956,8 +3034,45 @@ const createAppInstance = () => createApp({
         };
 
         // --- Helpers ---
-        const setTool = (t) => {
-            if (session.selection.active && t !== 'move') anchorSelection();
+        let lastNonEyedropperTool = session.tool;
+        let isNativeEyedropperOpen = false;
+
+        const pickPrimaryColorWithNativeEyedropper = async () => {
+            if (!window.EyeDropper || isNativeEyedropperOpen) return false;
+
+            isNativeEyedropperOpen = true;
+            try {
+                const result = await new EyeDropper().open();
+                if (result?.sRGBHex) {
+                    session.colors.primary = result.sRGBHex;
+                }
+                return true;
+            } catch (err) {
+                if (err?.name !== 'AbortError') {
+                    console.warn('Native eyedropper failed; falling back to canvas eyedropper.', err);
+                    return false;
+                }
+                return true;
+            } finally {
+                isNativeEyedropperOpen = false;
+            }
+        };
+
+        const setTool = async (t) => {
+            if (session.selection.active && t !== 'move') await anchorSelection();
+
+            if (t === 'eyedropper') {
+                const previousTool = session.tool === 'eyedropper' ? lastNonEyedropperTool : session.tool;
+                session.tool = 'eyedropper';
+                const handledByNativePicker = await pickPrimaryColorWithNativeEyedropper();
+                if (handledByNativePicker) {
+                    session.tool = previousTool || 'pen';
+                    return;
+                }
+            } else {
+                lastNonEyedropperTool = t;
+            }
+
             session.tool = t;
         };
 
@@ -2987,7 +3102,9 @@ const createAppInstance = () => createApp({
 
             if (savedProjects.length > 0) {
                 // Get latest meta
-                const loadMeta = savedProjects[savedProjects.length - 1];
+                const loadMeta = savedProjects
+                    .slice()
+                    .sort((a, b) => (b.modifiedAt || b.meta?.modifiedAt || b.meta?.createdAt || 0) - (a.modifiedAt || a.meta?.modifiedAt || a.meta?.createdAt || 0))[0];
 
                 // Restore frames from 'frames' store
                 // meta.frames contains list of frame IDs
@@ -2998,15 +3115,20 @@ const createAppInstance = () => createApp({
                 // Filter out missing frames just in case
                 const validFrames = loadedFrames.filter(f => f);
 
-                Object.assign(project, loadMeta);
+                const {
+                    settings: loadedSettings,
+                    sessionState: loadedSessionState,
+                    ...loadedProject
+                } = loadMeta;
+                Object.assign(project, loadedProject);
 
                 // Restore settings and session
-                if (loadMeta.settings) {
-                    Object.assign(settings, loadMeta.settings);
+                if (loadedSettings) {
+                    Object.assign(settings, loadedSettings);
                 }
-                if (loadMeta.sessionState) {
-                    if (loadMeta.sessionState.colors) Object.assign(session.colors, loadMeta.sessionState.colors);
-                    if (loadMeta.sessionState.brush) Object.assign(session.brush, loadMeta.sessionState.brush);
+                if (loadedSessionState) {
+                    if (loadedSessionState.colors) Object.assign(session.colors, loadedSessionState.colors);
+                    if (loadedSessionState.brush) Object.assign(session.brush, loadedSessionState.brush);
                 }
 
                 project.frames = validFrames; // Assign restored frames
@@ -3024,7 +3146,7 @@ const createAppInstance = () => createApp({
                     ensureFrame(0);
                 }
             } else {
-                actions.initProject();
+                await actions.initProject();
             }
             syncOnionLayerSelection();
 
@@ -3032,7 +3154,7 @@ const createAppInstance = () => createApp({
             renderCurrentFrame();
 
             // Keybindings
-            window.addEventListener('keydown', (e) => {
+            window.addEventListener('keydown', async (e) => {
                 if (e.target.tagName === 'INPUT') return;
 
                 switch (e.key.toLowerCase()) {
@@ -3072,33 +3194,33 @@ const createAppInstance = () => createApp({
                     case 'v':
                         if (e.ctrlKey || e.metaKey) {
                             e.preventDefault();
-                            actions.paste();
+                            await actions.paste();
                         } else {
-                            setTool('move');
+                            await setTool('move');
                         }
                         break;
                     case 'b':
-                        setTool('pen');
+                        await setTool('pen');
                         break;
                     case 'e':
-                        setTool('eraser');
+                        await setTool('eraser');
                         break;
                     case 'g':
-                        setTool('bucket');
+                        await setTool('bucket');
                         break;
                     case 'i':
-                        setTool('eyedropper');
+                        await setTool('eyedropper');
                         break;
                     case 'm':
-                        setTool('select-rect');
+                        await setTool('select-rect');
                         break;
                     case 'l':
-                        setTool('select-lasso');
+                        await setTool('select-lasso');
                         break;
                     case 'h':
                         if (e.ctrlKey || e.metaKey) {
                             e.preventDefault();
-                            actions.flipFrame('horizontal');
+                            await actions.flipFrame('horizontal');
                         }
                         break;
 
@@ -3109,13 +3231,13 @@ const createAppInstance = () => createApp({
                         actions.adjustBrushSize(1);
                         break;
                     case 'arrowleft':
-                        actions.prevFrame();
+                        await actions.prevFrame();
                         break;
                     case 'arrowright':
                         if (session.currentFrameIndex === project.frames.length - 1) {
-                            actions.addFrame(); // Auto-create next frame
+                            await actions.addFrame(); // Auto-create next frame
                         } else {
-                            actions.nextFrame();
+                            await actions.nextFrame();
                         }
                         break;
                     case 'delete':
@@ -3124,14 +3246,14 @@ const createAppInstance = () => createApp({
                             actions.clearSelection();
                         } else {
                             if (confirm('Delete current frame?')) {
-                                actions.deleteFrame(session.currentFrameIndex);
+                                await actions.deleteFrame(session.currentFrameIndex);
                             }
                         }
                         break;
                     case 's':
                         if (e.ctrlKey) {
                             e.preventDefault();
-                            actions.saveProject();
+                            await actions.saveProject();
                         }
                         break;
                 }
