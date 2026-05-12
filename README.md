@@ -1,3 +1,6 @@
+<img width="1000" height="1000" alt="d64b6f73-1e48-4fbf-a121-38792639ec2a" src="https://github.com/user-attachments/assets/f75748bc-bfeb-4f5d-9ec9-03a94d3385ac" />
+
+
 - 再生/停止: `Space`
 - 反転 (水平、データごと): `Ctrl` + `H`
 - 保存: `Ctrl` + `S`
