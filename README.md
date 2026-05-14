@@ -1,4 +1,4 @@
-<img width="300" height="300" alt="d64b6f73-1e48-4fbf-a121-38792639ec2a" src="https://github.com/user-attachments/assets/f75748bc-bfeb-4f5d-9ec9-03a94d3385ac" />
+<img width="720" height="456" alt="New Piskel" src="https://github.com/user-attachments/assets/36d1140f-84c3-4a79-8743-de74009f54c5" />
 
 
 - 再生/停止: `Space`
