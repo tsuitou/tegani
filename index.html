@@ -87,7 +87,7 @@
             overflow: hidden;
         }
         .timeline-controls {
-            width: 200px;
+            width: 230px;
             padding: 10px;
             border-right: 1px solid var(--border);
             display: flex;
@@ -350,6 +350,11 @@
             border-color: #333;
             color: #666;
         }
+        /* Highlight the history group whose scope Ctrl+Z/Y currently targets */
+        .scope-active .btn-history:not(:disabled) {
+            border-color: var(--accent, #4a9eff);
+            box-shadow: 0 0 0 1px var(--accent, #4a9eff) inset;
+        }
 
         /* Custom UI Components */
         .btn-group { display: flex; border: 1px solid #555; border-radius: 4px; overflow: hidden; }
@@ -427,19 +432,31 @@
     <!-- Timeline -->
     <div class="timeline">
         <div class="timeline-controls">
-            <div class="transport-controls">
-                <button class="btn-transport" @click="actions.prevFrame()"><i class="fas fa-step-backward"></i></button>
-                <button class="btn-transport" :class="{active: session.isPlaying}" @click="actions.togglePlay()">
-                    <i :class="session.isPlaying ? 'fas fa-pause' : 'fas fa-play'"></i>
-                </button>
-                <button class="btn-transport" @click="actions.nextFrame()"><i class="fas fa-step-forward"></i></button>
+            <div class="timeline-row" style="display:flex; align-items:center; justify-content:center; gap:10px;">
+                <div class="timeline-settings">
+                    <label>FPS:</label>
+                    <input class="input-fps" type="number" v-model.number="project.meta.fps" min="1" max="60" @change="project.meta.fps = getSafeFps()">
+                </div>
+                <div class="transport-controls">
+                    <button class="btn-transport" @click="actions.prevFrame()"><i class="fas fa-step-backward"></i></button>
+                    <button class="btn-transport" :class="{active: session.isPlaying}" @click="actions.togglePlay()">
+                        <i :class="session.isPlaying ? 'fas fa-pause' : 'fas fa-play'"></i>
+                    </button>
+                    <button class="btn-transport" @click="actions.nextFrame()"><i class="fas fa-step-forward"></i></button>
+                </div>
             </div>
-        <div class="timeline-settings">
-            <label>FPS:</label>
-            <input class="input-fps" type="number" v-model.number="project.meta.fps" min="1" max="60" @change="project.meta.fps = getSafeFps()">
-            <div class="btn-transport" :class="{active: settings.onionSkin.enabled}" @click="settings.onionSkin.enabled = !settings.onionSkin.enabled" title="Onion Skin">
-                <i class="fas fa-layer-group"></i>
-            </div>
+            <div class="timeline-row" style="display:flex; align-items:center; justify-content:center; gap:10px; margin-top:6px;">
+                <div class="timeline-history" :class="{'scope-active': session.activeScope==='timeline'}" style="display:flex; gap:6px;">
+                    <button class="btn-history" :disabled="session.activeScope !== 'timeline' || !historyState.timelineUndo" @click="undo" title="Undo frame change">
+                        <i class="fas fa-undo"></i>
+                    </button>
+                    <button class="btn-history" :disabled="session.activeScope !== 'timeline' || !historyState.timelineRedo" @click="redo" title="Redo frame change">
+                        <i class="fas fa-redo"></i>
+                    </button>
+                </div>
+                <div class="btn-transport" :class="{active: settings.onionSkin.enabled}" @click="settings.onionSkin.enabled = !settings.onionSkin.enabled" title="Onion Skin">
+                    <i class="fas fa-layer-group"></i>
+                </div>
             </div>
         </div>
         <div class="frame-strip" ref="frameStripRef">
@@ -570,12 +587,12 @@
     <!-- Right Panels -->
     <div class="panels">
         <!-- Undo/Redo Buttons -->
-        <div class="panel-section history-controls" style="border-bottom: 1px solid #222; padding: 6px 10px; display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+        <div class="panel-section history-controls" :class="{'scope-active': session.activeScope==='canvas'}" style="border-bottom: 1px solid #222; padding: 6px 10px; display: flex; align-items: center; justify-content: space-between; gap: 8px;">
             <div style="display: flex; gap: 6px;">
-                <button class="btn-history" :disabled="!historyState.canUndo" @click="undo" title="Undo (Ctrl+Z)">
+                <button class="btn-history" :disabled="session.activeScope !== 'canvas' || !historyState.canvasUndo" @click="undo" title="Undo drawing (Ctrl+Z)">
                     <i class="fas fa-undo"></i>
                 </button>
-                <button class="btn-history" :disabled="!historyState.canRedo" @click="redo" title="Redo (Ctrl+Y)">
+                <button class="btn-history" :disabled="session.activeScope !== 'canvas' || !historyState.canvasRedo" @click="redo" title="Redo drawing (Ctrl+Y)">
                     <i class="fas fa-redo"></i>
                 </button>
                 <button class="btn-history" @click="actions.flipFrame('horizontal')" title="Flip Horizontal (Ctrl+H)">
@@ -930,7 +947,8 @@ const createDefaultSession = () => ({
     isRightClick: false,
     isPanning: false,
     activePointerId: null,
-    dragOverIndex: null
+    dragOverIndex: null,
+    activeScope: 'canvas' // which history Ctrl+Z/Y targets: 'canvas' | 'timeline'
 });
 
 function generateUUID() {
@@ -986,7 +1004,6 @@ const createAppInstance = () => createApp({
             index: null
         });
         const workspaceRef = ref(null);
-        const layerBuffers = new Map(); // Offscreen/detached canvas per layer for double buffering
         let onionBuffer = null; // Offscreen buffer for onion skin rendering
 
         // Core State
@@ -1004,13 +1021,18 @@ const createAppInstance = () => createApp({
         });
 
         const historyState = reactive({
-            canUndo: false,
-            canRedo: false
+            canvasUndo: false,
+            canvasRedo: false,
+            timelineUndo: false,
+            timelineRedo: false
         });
 
         const updateHistoryState = () => {
-            historyState.canUndo = history.undo.length > 0;
-            historyState.canRedo = history.redo.length > 0;
+            const ch = currentCanvasHistory();
+            historyState.canvasUndo = ch.undo.length > 0;
+            historyState.canvasRedo = ch.redo.length > 0;
+            historyState.timelineUndo = histories.timeline.undo.length > 0;
+            historyState.timelineRedo = histories.timeline.redo.length > 0;
         };
 
         const session = reactive(createDefaultSession());
@@ -1031,15 +1053,27 @@ const createAppInstance = () => createApp({
             }
         });
 
-        // Single global, time-ordered history timeline.
-        // Each entry is one of:
-        //   { type: 'pixel', frameId, snap }            -- single-frame deep clone (drawing edits)
-        //   { type: 'structural', order: [...frames], index } -- frame list ordering (add/delete/reorder)
-        // Using one stack keeps undo/redo ordering correct across mixed edit kinds.
-        const history = {
-            undo: [],
-            redo: []
+        // Histories routed by the area the user last touched (session.activeScope).
+        //   canvas   -- PER FRAME; pixel edits { type:'pixel', frameId, patches:[{layerId,bbox,data}] }
+        //               Each frame owns its own undo/redo stack (canvasHistories: frameId -> stacks).
+        //   timeline -- global & ephemeral; frame structure { type:'structural', order, index }
+        // The timeline stack is cleared whenever a canvas edit commits a new entry (a frame
+        // add/delete/reorder is only "takeable back" until you start drawing again).
+        const histories = {
+            timeline: { undo: [], redo: [] }
         };
+        const canvasHistories = new Map(); // frameId -> { undo:[], redo:[] }
+        const canvasHistory = (frameId) => {
+            let h = canvasHistories.get(frameId);
+            if (!h) { h = { undo: [], redo: [] }; canvasHistories.set(frameId, h); }
+            return h;
+        };
+        const currentCanvasHistory = () => {
+            const f = currentFrame.value;
+            return f ? canvasHistory(f.id) : { undo: [], redo: [] };
+        };
+        // The stack pair that Ctrl+Z/Y currently targets.
+        const activeStacks = () => session.activeScope === 'timeline' ? histories.timeline : currentCanvasHistory();
 
         const settings = reactive(cloneDefaultSettings());
 
@@ -1070,15 +1104,90 @@ const createAppInstance = () => createApp({
         };
 
         const getUndoLimit = () => Math.max(1, settings.undoLimit || 20);
-        const cloneFrameData = (frame) => JSON.parse(JSON.stringify(toRaw(frame)));
-        const trimUndoStack = () => {
-            const limit = getUndoLimit();
-            while (history.undo.length > limit) history.undo.shift();
+
+        // --- Region-diff history ---
+        // Bounding box of differing pixels between two same-size RGBA buffers (null if equal).
+        const diffBBox = (a, b, w, h) => {
+            let minX = w, minY = h, maxX = -1, maxY = -1;
+            for (let y = 0; y < h; y++) {
+                const row = y * w * 4;
+                for (let x = 0; x < w; x++) {
+                    const i = row + x * 4;
+                    if (a[i] !== b[i] || a[i + 1] !== b[i + 1] || a[i + 2] !== b[i + 2] || a[i + 3] !== b[i + 3]) {
+                        if (x < minX) minX = x;
+                        if (x > maxX) maxX = x;
+                        if (y < minY) minY = y;
+                        if (y > maxY) maxY = y;
+                    }
+                }
+            }
+            if (maxX < 0) return null;
+            return { x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1 };
         };
+        const cropImageData = (img, bbox) => {
+            const out = new ImageData(bbox.w, bbox.h);
+            const src = img.data, dst = out.data, sw = img.width;
+            for (let y = 0; y < bbox.h; y++) {
+                const srow = ((bbox.y + y) * sw + bbox.x) * 4;
+                dst.set(src.subarray(srow, srow + bbox.w * 4), y * bbox.w * 4);
+            }
+            return out;
+        };
+
+        const trimStack = (stack) => {
+            const limit = getUndoLimit();
+            while (stack.length > limit) stack.shift();
+        };
+        let pendingEdit = null;
         const resetAllHistory = () => {
-            history.undo = [];
-            history.redo = [];
+            canvasHistories.clear();
+            histories.timeline.undo = [];
+            histories.timeline.redo = [];
+            pendingEdit = null;
             updateHistoryState();
+        };
+
+        // A pixel edit captures the "before" image of the affected layers on the visible
+        // working canvases at begin, and computes the changed bbox at commit. Only the
+        // changed rectangle ("before") is stored; the "after" is recovered on undo, so a
+        // deep undo stack of small strokes stays cheap in memory.
+        const beginPixelEdit = (layerIds) => {
+            const frame = currentFrame.value;
+            if (!frame) { pendingEdit = null; return; }
+            const w = project.meta.width, h = project.meta.height;
+            const before = {};
+            for (const id of layerIds) {
+                const ctx = getCtx(id);
+                if (ctx) before[id] = ctx.getImageData(0, 0, w, h);
+            }
+            pendingEdit = { frameId: frame.id, before };
+        };
+        const commitPixelEdit = () => {
+            if (!pendingEdit) return;
+            const w = project.meta.width, h = project.meta.height;
+            const patches = [];
+            for (const id in pendingEdit.before) {
+                const ctx = getCtx(Number(id));
+                if (!ctx) continue;
+                const before = pendingEdit.before[id];
+                const after = ctx.getImageData(0, 0, w, h);
+                const bbox = diffBBox(before.data, after.data, w, h);
+                if (bbox) patches.push({ layerId: Number(id), bbox, data: cropImageData(before, bbox) });
+            }
+            const frameId = pendingEdit.frameId;
+            pendingEdit = null;
+            if (patches.length) {
+                const ch = canvasHistory(frameId);
+                ch.undo.push({ type: 'pixel', frameId, patches });
+                ch.redo = [];
+                // A canvas edit invalidates the ephemeral timeline take-backs.
+                histories.timeline.undo = [];
+                histories.timeline.redo = [];
+                session.activeScope = 'canvas';
+                trimStack(ch.undo);
+                updateHistoryState();
+                gcCells(); // frames only held by the discarded timeline history can be freed
+            }
         };
 
         // Pen smoothing bounds (UI strength 1-10 maps into this range)
@@ -1107,20 +1216,95 @@ const createAppInstance = () => createApp({
         // --- Core Engine Methods ---
 
         // Helper to create solid color data URL
-        const createSolidColorData = (w, h, color) => {
+        // --- Cell Store (non-reactive pixel storage) ---
+        // Pixel data lives OUTSIDE Vue reactivity. frame.id -> { [layerId]: HTMLCanvasElement }.
+        // The visible <canvas> elements are the working surface for the CURRENT frame; these
+        // cells are the authoritative store for every frame, kept in sync via cheap drawImage.
+        const cellStore = new Map();
+        const makeSurface = (w, h) => {
             const c = document.createElement('canvas');
             c.width = w;
             c.height = h;
-            const ctx = c.getContext('2d');
-            ctx.fillStyle = color;
-            ctx.fillRect(0, 0, w, h);
-            return c.toDataURL();
+            return c;
         };
-        const createTransparentData = (w, h) => {
-            const c = document.createElement('canvas');
-            c.width = w;
-            c.height = h;
-            return c.toDataURL();
+        const frameCells = (frameId) => {
+            let c = cellStore.get(frameId);
+            if (!c) { c = {}; cellStore.set(frameId, c); }
+            return c;
+        };
+        // Ensure a layer surface exists for a frame (sized to project). Layer 0 seeds with bg color.
+        const cellSurface = (frame, layerId) => {
+            const cells = frameCells(frame.id);
+            const w = project.meta.width, h = project.meta.height;
+            let s = cells[layerId];
+            if (!s) {
+                s = makeSurface(w, h);
+                if (layerId === 0) {
+                    const ctx = s.getContext('2d');
+                    ctx.fillStyle = settings.backgroundColor || "#FFFFFF";
+                    ctx.fillRect(0, 0, w, h);
+                }
+                cells[layerId] = s;
+            } else if (s.width !== w || s.height !== h) {
+                // Project resized: re-fit surface, preserving existing pixels
+                const old = s;
+                s = makeSurface(w, h);
+                s.getContext('2d').drawImage(old, 0, 0);
+                cells[layerId] = s;
+            }
+            return s;
+        };
+        // Deep-copy a set of layer surfaces (keyed by layerId) into fresh canvases.
+        const copyCellSet = (src) => {
+            const dst = {};
+            for (const k in src) {
+                const s = src[k];
+                const c = makeSurface(s.width, s.height);
+                c.getContext('2d').drawImage(s, 0, 0);
+                dst[k] = c;
+            }
+            return dst;
+        };
+        // Deep-copy every cell of one frame into another id (frame duplication).
+        const cloneCells = (srcFrameId, dstFrameId) => {
+            cellStore.set(dstFrameId, copyCellSet(cellStore.get(srcFrameId) || {}));
+        };
+        // Non-reactive whole-frame clipboard (timeline copy/paste).
+        let frameClipboardCells = null;
+
+        // --- Cell (de)serialization for persistence (PNG blobs at the I/O boundary) ---
+        const encodeCellToBlob = (canvas) => new Promise(res => canvas.toBlob(b => res(b), 'image/png'));
+        const serializeFrameCells = async (frame) => {
+            const src = cellStore.get(frame.id) || {};
+            const layers = {};
+            for (const k in src) layers[k] = await encodeCellToBlob(src[k]);
+            return { id: frame.id, layers, thumbnail: frame.thumbnail || null };
+        };
+        const deserializeFrameCells = async (rec) => {
+            const dst = {};
+            const layers = rec.layers || {};
+            for (const k in layers) {
+                const surface = makeSurface(project.meta.width, project.meta.height);
+                try {
+                    const bmp = await createImageBitmap(layers[k]);
+                    surface.getContext('2d').drawImage(bmp, 0, 0);
+                    if (bmp.close) bmp.close();
+                } catch (_) {}
+                dst[k] = surface;
+            }
+            cellStore.set(rec.id, dst);
+        };
+        // Drop surfaces no longer referenced by any live frame or any structural history entry.
+        const gcCells = () => {
+            const live = new Set(project.frames.map(f => f.id));
+            const scan = (stack) => stack.forEach(e => {
+                if (e.type === 'structural' && Array.isArray(e.order)) e.order.forEach(f => live.add(f.id));
+            });
+            scan(histories.timeline.undo);
+            scan(histories.timeline.redo);
+            for (const id of [...cellStore.keys()]) if (!live.has(id)) cellStore.delete(id);
+            // A frame that is gone for good also loses its per-frame undo history.
+            for (const id of [...canvasHistories.keys()]) if (!live.has(id)) canvasHistories.delete(id);
         };
 
         const resetSessionState = () => {
@@ -1148,8 +1332,9 @@ const createAppInstance = () => createApp({
             img.src = src;
         });
 
-        // Helper to generate thumbnail
-        const generateThumbnail = async (frame) => {
+        // Helper to generate thumbnail — composites cell surfaces directly (no base64 decode).
+        // Returns a small JPEG data URL purely for timeline display (an I/O boundary).
+        const generateThumbnail = (frame) => {
             const MAX_SIZE = 100;
             const mw = project.meta.width || 800;
             const mh = project.meta.height || 600;
@@ -1168,22 +1353,11 @@ const createAppInstance = () => createApp({
             c.height = h;
             const ctx = c.getContext('2d');
 
-            // Draw background
-            const bgSrc = frame.layers[0];
-            if (bgSrc) {
-                const img = await loadImageOrNull(bgSrc);
-                if (img) ctx.drawImage(img, 0, 0, w, h);
-            }
-
-
-
-            // Draw visible drawing layers
-            for (let i = 1; i < project.layers.length; i++) {
-                const l = project.layers[i];
-                if (l.type === 'draw' && l.visible && frame.layers[l.id]) {
-                    const img = await loadImageOrNull(frame.layers[l.id]);
-                    if (img) ctx.drawImage(img, 0, 0, w, h);
-                }
+            for (const l of project.layers) {
+                if (l.type !== 'draw') continue;
+                if (l.id !== 0 && !l.visible) continue;
+                const surface = cellSurface(frame, l.id);
+                ctx.drawImage(surface, 0, 0, w, h);
             }
             return c.toDataURL('image/jpeg', 0.8);
         };
@@ -1192,24 +1366,6 @@ const createAppInstance = () => createApp({
         const getCtx = (layerId) => canvasRefs.value[layerId]?.getContext('2d', {
             willReadFrequently: true
         });
-        const getLayerBuffer = (layerId) => {
-            const w = project.meta.width;
-            const h = project.meta.height;
-            let buf = layerBuffers.get(layerId);
-            if (!buf) {
-                buf = typeof OffscreenCanvas !== 'undefined'
-                    ? new OffscreenCanvas(w, h)
-                    : Object.assign(document.createElement('canvas'), {
-                        width: w,
-                        height: h
-                    });
-                layerBuffers.set(layerId, buf);
-            } else if (buf.width !== w || buf.height !== h) {
-                buf.width = w;
-                buf.height = h;
-            }
-            return buf;
-        };
         const getOnionBuffer = () => {
             const w = project.meta.width;
             const h = project.meta.height;
@@ -1232,39 +1388,18 @@ const createAppInstance = () => createApp({
             ctx.clearRect(0, 0, project.meta.width, project.meta.height);
         };
 
+        // A frame is just metadata now; pixel cells are created lazily in the cell store.
+        // Ensure every layer's surface exists so onion/thumbnail of untouched frames work.
         const normalizeFrame = (frame) => {
             if (!frame) return;
-            if (!frame.layers) frame.layers = {};
-
-            // Ensure background layer (0) is always a data URL (image), never a hex string.
-            // This unifies the behavior for eraser and visibility toggling.
-            const bgLayer = frame.layers[0];
-
-            if (bgLayer === undefined || bgLayer === null || (typeof bgLayer === 'string' && bgLayer.startsWith('#'))) {
-                const color = (typeof bgLayer === 'string' && bgLayer.startsWith('#')) ? bgLayer : (settings.backgroundColor || "#FFFFFF");
-                frame.layers[0] = createSolidColorData(project.meta.width, project.meta.height, color);
-            }
-
-            // Ensure every layer slot exists
-            project.layers.forEach(l => {
-                if (frame.layers[l.id] === undefined) {
-                    frame.layers[l.id] = l.id === 0 ?
-                        createSolidColorData(project.meta.width, project.meta.height, settings.backgroundColor || "#FFFFFF") :
-                        createTransparentData(project.meta.width, project.meta.height);
-                }
-            });
+            if (!frame.id) frame.id = generateUUID();
+            project.layers.forEach(l => cellSurface(frame, l.id));
         };
 
         const ensureFrame = (idx) => {
             if (!project.frames[idx]) {
-                const bgData = createSolidColorData(project.meta.width, project.meta.height, settings.backgroundColor || "#FFFFFF");
-                const layersSeed = {};
-                project.layers.forEach(l => {
-                    layersSeed[l.id] = l.id === 0 ? bgData : createTransparentData(project.meta.width, project.meta.height);
-                });
                 project.frames[idx] = {
                     id: generateUUID(),
-                    layers: layersSeed,
                     thumbnail: null
                 };
             }
@@ -1272,91 +1407,66 @@ const createAppInstance = () => createApp({
             return project.frames[idx];
         };
 
-        // Monotonic token: each render bumps it; an in-flight render that becomes stale
-        // (because a newer render started during its async image loads) aborts before painting.
-        let renderToken = 0;
-        const renderCurrentFrame = async () => {
+        // Compositor: blit each layer's cell surface straight onto its visible canvas.
+        // Fully synchronous (drawImage, no decode), so frame switches are a GPU copy.
+        const renderCurrentFrame = () => {
             ensureFrame(session.currentFrameIndex);
-            if (!currentFrame.value) return;
+            const frame = currentFrame.value;
+            if (!frame) return;
             // If canvases are not yet mounted (e.g., during remount), skip
             if (!canvasBg.value || !canvasTemp.value) return;
 
-            const myToken = ++renderToken;
-            const frame = currentFrame.value; // Capture: index may change during awaits
             const w = project.meta.width;
             const h = project.meta.height;
 
-            // 1. Preload Phase: decode all layer images (cached/decoded once per data URL)
-            const loadedImages = new Map();
-            await Promise.all(drawingLayers.value.map(async (layer) => {
-                const src = frame.layers[layer.id];
-                if (!src || (typeof src === 'string' && src.startsWith('#'))) return;
-                try {
-                    const img = await loadImageCached(src);
-                    loadedImages.set(layer.id, img);
-                } catch (_) {
-                    // Skip layers whose image failed to load
-                }
-            }));
+            // bg canvas is just the transparency backdrop; keep it clear.
+            const bgCtx = canvasBg.value.getContext('2d');
+            if (bgCtx) bgCtx.clearRect(0, 0, w, h);
 
-            // A newer render superseded this one while we were decoding; abort to avoid
-            // painting a stale frame over the current one.
-            if (myToken !== renderToken) return;
-
-            // 2. Render Phase: Draw into offscreen buffers, then copy once to visible canvases
-            const bgCtx = canvasBg.value?.getContext('2d');
-            if (!bgCtx) return;
-            bgCtx.clearRect(0, 0, w, h);
-
-            drawingLayers.value.forEach(layer => {
-                const buffer = getLayerBuffer(layer.id);
-                const bufCtx = buffer.getContext('2d');
-                if (!bufCtx) return;
-                bufCtx.clearRect(0, 0, w, h);
-
-                const src = frame.layers[layer.id];
-                if (!src) return;
-                if (typeof src === 'string' && src.startsWith('#')) {
-                    bufCtx.fillStyle = src;
-                    bufCtx.fillRect(0, 0, w, h);
-                } else {
-                    const img = loadedImages.get(layer.id);
-                    if (img) {
-                        bufCtx.drawImage(img, 0, 0);
-                    }
-                }
-            });
-
-            // Copy once to visible canvases to minimize flicker
             for (const layer of drawingLayers.value) {
                 const ctx = getCtx(layer.id);
-                const buffer = getLayerBuffer(layer.id);
-                if (!ctx || !buffer) continue;
+                if (!ctx) continue;
+                const surface = cellSurface(frame, layer.id);
                 ctx.globalCompositeOperation = 'copy';
-                ctx.drawImage(buffer, 0, 0);
+                ctx.drawImage(surface, 0, 0);
                 ctx.globalCompositeOperation = 'source-over';
             }
 
-            await renderOnionSkin();
-            if (myToken !== renderToken) return;
+            renderOnionSkin();
             renderSelectionOverlay();
         };
 
-        const saveCurrentLayerToState = async () => {
-            ensureFrame(session.currentFrameIndex);
-            if (!currentFrame.value) return;
-            // Save all drawing layers to frame data
-            drawingLayers.value.forEach(l => {
+        // Copy the visible working canvases of a frame back into its authoritative cells.
+        const flushFrameCells = (frame) => {
+            for (const l of drawingLayers.value) {
                 const cvs = canvasRefs.value[l.id];
-                if (cvs) {
-                    currentFrame.value.layers[l.id] = cvs.toDataURL();
-                }
-            });
+                if (!cvs) continue;
+                const surface = cellSurface(frame, l.id);
+                const sctx = surface.getContext('2d');
+                sctx.clearRect(0, 0, surface.width, surface.height);
+                sctx.drawImage(cvs, 0, 0);
+            }
+        };
 
-            // triggerAutoSave(); 
-            // Generate Thumbnail
-            currentFrame.value.thumbnail = await generateThumbnail(currentFrame.value);
+        // Thumbnails are display-only; regenerate at most once per idle gap.
+        let thumbTimer = null;
+        const scheduleThumbnail = (frame) => {
+            if (thumbTimer) clearTimeout(thumbTimer);
+            thumbTimer = setTimeout(() => {
+                thumbTimer = null;
+                if (frame) frame.thumbnail = generateThumbnail(frame);
+            }, 150);
+        };
 
+        // Finalize a pixel edit: flush working canvases to cells, commit region-diff
+        // history (no-op if no edit is open), and refresh the thumbnail.
+        const saveCurrentLayerToState = () => {
+            ensureFrame(session.currentFrameIndex);
+            const frame = currentFrame.value;
+            if (!frame) return;
+            flushFrameCells(frame);
+            commitPixelEdit();
+            scheduleThumbnail(frame);
         };
 
         // --- History Management ---
@@ -1372,50 +1482,50 @@ const createAppInstance = () => createApp({
             lastStrokeTime = null;
         };
 
-        // Record a pixel-level edit on the current frame (before mutation).
-        const recordHistory = () => {
+        // Begin a pixel-level edit on the given layers (defaults to the active layer).
+        // The matching commit (region-diff finalize) happens in saveCurrentLayerToState.
+        const recordHistory = (layerIds = null) => {
             if (session.isPlaying) return;
-            const frame = project.frames[session.currentFrameIndex];
-            if (!frame) return;
-            let snap;
-            try {
-                snap = cloneFrameData(frame);
-            } catch (e) {
-                console.error("Snapshot failed", e);
-                return;
-            }
-            history.undo.push({ type: 'pixel', frameId: frame.id, snap });
-            trimUndoStack();
-            history.redo = []; // Clear redo on new action
-            updateHistoryState();
+            beginPixelEdit(layerIds || [session.currentLayerId]);
         };
 
         // Record a structural edit on the frame list (before mutation):
-        // add / delete / insert / paste / reorder frames.
+        // add / delete / insert / paste / reorder frames. Goes to the timeline scope.
         const recordStructural = () => {
             if (session.isPlaying) return;
-            history.undo.push({
+            histories.timeline.undo.push({
                 type: 'structural',
                 order: project.frames.slice(),
                 index: session.currentFrameIndex
             });
-            trimUndoStack();
-            history.redo = [];
+            histories.timeline.redo = [];
+            session.activeScope = 'timeline';
+            trimStack(histories.timeline.undo);
             updateHistoryState();
         };
 
         // Apply a history entry; returns the inverse entry (current state) to push on the opposite stack.
-        const applyHistoryEntry = async (entry) => {
+        const applyHistoryEntry = (entry) => {
             if (entry.type === 'pixel') {
                 const idx = project.frames.findIndex(f => f.id === entry.frameId);
                 if (idx === -1) return null; // Frame no longer exists (e.g. structurally removed); skip
                 session.currentFrameIndex = idx;
-                const inverse = { type: 'pixel', frameId: entry.frameId, snap: cloneFrameData(project.frames[idx]) };
-                project.frames[idx] = entry.snap;
-                await nextTick();
-                normalizeFrame(project.frames[idx]);
-                await renderCurrentFrame();
-                return inverse;
+                const frame = project.frames[idx];
+                const inversePatches = [];
+                for (const p of entry.patches) {
+                    const surface = cellSurface(frame, p.layerId);
+                    const sctx = surface.getContext('2d');
+                    // Capture current region for the inverse, then restore the stored region.
+                    inversePatches.push({
+                        layerId: p.layerId,
+                        bbox: p.bbox,
+                        data: sctx.getImageData(p.bbox.x, p.bbox.y, p.bbox.w, p.bbox.h)
+                    });
+                    sctx.putImageData(p.data, p.bbox.x, p.bbox.y);
+                }
+                frame.thumbnail = generateThumbnail(frame);
+                renderCurrentFrame();
+                return { type: 'pixel', frameId: entry.frameId, patches: inversePatches };
             }
             // structural
             const inverse = {
@@ -1425,8 +1535,7 @@ const createAppInstance = () => createApp({
             };
             project.frames.splice(0, project.frames.length, ...entry.order);
             session.currentFrameIndex = Math.max(0, Math.min(entry.index, project.frames.length - 1));
-            await nextTick();
-            await renderCurrentFrame();
+            renderCurrentFrame();
             return inverse;
         };
 
@@ -1443,27 +1552,32 @@ const createAppInstance = () => createApp({
             }
         };
 
+        // Undo/redo act only on the scope the user is focused on. A null inverse means the
+        // entry was a pixel edit whose frame no longer exists -> skip it and try the next.
         const undo = async () => {
             resetInteractionState();
             if (session.isPlaying) return;
-            if (history.undo.length === 0) return;
-            const entry = history.undo.pop();
-            const inverse = await applyHistoryEntry(entry);
-            if (inverse) history.redo.push(inverse);
+            const stacks = activeStacks();
+            while (stacks.undo.length > 0) {
+                const entry = stacks.undo.pop();
+                const inverse = await applyHistoryEntry(entry);
+                if (inverse) { stacks.redo.push(inverse); break; }
+            }
             updateHistoryState();
+            gcCells();
         };
 
         const redo = async () => {
             resetInteractionState();
             if (session.isPlaying) return;
-            if (history.redo.length === 0) return;
-            const entry = history.redo.pop();
-            const inverse = await applyHistoryEntry(entry);
-            if (inverse) {
-                history.undo.push(inverse);
-                trimUndoStack();
+            const stacks = activeStacks();
+            while (stacks.redo.length > 0) {
+                const entry = stacks.redo.pop();
+                const inverse = await applyHistoryEntry(entry);
+                if (inverse) { stacks.undo.push(inverse); trimStack(stacks.undo); break; }
             }
             updateHistoryState();
+            gcCells();
         };
 
         // 2. Drawing Logic (Interpolation)
@@ -1951,7 +2065,7 @@ const createAppInstance = () => createApp({
         };
 
         // 5. Onion Skin Logic
-        const renderOnionSkin = async () => {
+        const renderOnionSkin = () => {
             const target = canvasOnion.value;
             const targetCtx = target?.getContext('2d');
             if (!targetCtx) return;
@@ -1968,7 +2082,7 @@ const createAppInstance = () => createApp({
                     if (idx >= 0) {
                         const prevFrame = project.frames[idx];
                         if (prevFrame) {
-                            await drawTintedFrame(bufCtx, prevFrame, settings.onionSkin.prevTint, settings.onionSkin.opacity);
+                            drawTintedFrame(bufCtx, prevFrame, settings.onionSkin.prevTint, settings.onionSkin.opacity);
                         }
                     }
                 }
@@ -1979,19 +2093,19 @@ const createAppInstance = () => createApp({
                     if (idx < project.frames.length) {
                         const nextFrame = project.frames[idx];
                         if (nextFrame) {
-                            await drawTintedFrame(bufCtx, nextFrame, settings.onionSkin.nextTint, settings.onionSkin.opacity);
+                            drawTintedFrame(bufCtx, nextFrame, settings.onionSkin.nextTint, settings.onionSkin.opacity);
                         }
                     }
                 }
             }
 
-            // Copy buffered onion render in a single pass to avoid visible clears during async work
+            // Copy buffered onion render in a single pass to avoid visible clears
             targetCtx.globalCompositeOperation = 'copy';
             targetCtx.drawImage(buffer, 0, 0);
             targetCtx.globalCompositeOperation = 'source-over';
         };
 
-        const drawTintedFrame = async (ctx, frame, color, opacity) => {
+        const drawTintedFrame = (ctx, frame, color, opacity) => {
             // Flatten frame layers to an offscreen canvas
             const off = document.createElement('canvas');
             off.width = project.meta.width;
@@ -2003,20 +2117,10 @@ const createAppInstance = () => createApp({
                 project.layers.filter(l => l.id === session.currentLayerId && enabledLayerIds.includes(l.id)) :
                 project.layers.filter(l => l.type === 'draw' && enabledLayerIds.includes(l.id)); // Include background if it's 'draw' type (which it is now)
 
-            // Draw layers
+            // Draw layers straight from their cell surfaces
             for (const layer of targetLayers) {
                 if (!layer.visible) continue;
-                const src = frame.layers[layer.id];
-                if (!src) continue;
-                if (typeof src === 'string' && src.startsWith('#')) {
-                    offCtx.fillStyle = src;
-                    offCtx.fillRect(0, 0, off.width, off.height);
-                } else {
-                    try {
-                        const img = await loadImageCached(src);
-                        if (img) offCtx.drawImage(img, 0, 0);
-                    } catch (_) {}
-                }
+                offCtx.drawImage(cellSurface(frame, layer.id), 0, 0);
             }
 
             // Luminance Masking
@@ -2429,9 +2533,9 @@ const createAppInstance = () => createApp({
                 await nextTick();
                 renderCurrentFrame();
                 // Clear any history accumulated during setup (e.g. the structural entry
-                // recorded by addFrame), then lay down a single clean baseline.
+                // recorded by addFrame). With region-diff history the initial pixels need
+                // no baseline snapshot — the first edit records its own "before".
                 resetAllHistory();
-                recordHistory(); // baseline
                 // Reset Viewport
                 viewport.zoom = 1.0;
                 viewport.pan = {
@@ -2443,26 +2547,13 @@ const createAppInstance = () => createApp({
             async addFrame(copy = false, insertMode = 'after-current') {
                 if (session.isPlaying) return;
                 await commitFloatingSelection();
-                let newFrame;
+                const newFrame = { id: generateUUID(), thumbnail: null };
                 if (copy && currentFrame.value) {
-                    ensureFrame(session.currentFrameIndex);
-                    newFrame = {
-                        id: generateUUID(),
-                        layers: JSON.parse(JSON.stringify(currentFrame.value.layers))
-                    };
-                } else {
-                    const bgData = createSolidColorData(project.meta.width, project.meta.height, settings.backgroundColor || "#FFFFFF");
-                    const layersSeed = {};
-                    project.layers.forEach(l => {
-                        layersSeed[l.id] = l.id === 0 ? bgData : createTransparentData(project.meta.width, project.meta.height);
-                    });
-                    newFrame = {
-                        id: generateUUID(),
-                        layers: layersSeed
-                    };
+                    flushFrameCells(currentFrame.value);
+                    cloneCells(currentFrame.value.id, newFrame.id);
                 }
                 normalizeFrame(newFrame);
-                newFrame.thumbnail = await generateThumbnail(newFrame);
+                newFrame.thumbnail = generateThumbnail(newFrame);
                 recordStructural();
                 const insertAt = insertMode === 'end'
                     ? project.frames.length
@@ -2506,6 +2597,7 @@ const createAppInstance = () => createApp({
             async togglePlay() {
                 if (session.isPlaying) {
                     session.isPlaying = false;
+                    updateHistoryState(); // playback may have landed on a different frame
                 } else {
                     if (session.selection.active) await anchorSelection();
                     session.isPlaying = true;
@@ -2523,6 +2615,7 @@ const createAppInstance = () => createApp({
 
             async saveProject() {
                 await commitFloatingSelection();
+                if (currentFrame.value) flushFrameCells(currentFrame.value);
                 const db = await dbPromise;
                 const rawProject = toRaw(project);
                 const rawSettings = toRaw(settings);
@@ -2542,13 +2635,13 @@ const createAppInstance = () => createApp({
                 };
 
                 try {
+                    // Encode all cells first; an IDB transaction must not span non-IDB awaits.
+                    const records = [];
+                    for (const f of frames) records.push(await serializeFrameCells(f));
                     const tx = db.transaction(['projects', 'frames'], 'readwrite');
-                    await tx.objectStore('projects').put(meta);
-
+                    tx.objectStore('projects').put(meta);
                     const frameStore = tx.objectStore('frames');
-                    for (const frame of frames) {
-                        await frameStore.put(frame);
-                    }
+                    for (const r of records) frameStore.put(r);
                     await tx.done;
                     alert('Saved!');
                 } catch (e) {
@@ -2565,12 +2658,22 @@ const createAppInstance = () => createApp({
 
             async saveJSON() {
                 await commitFloatingSelection();
+                if (currentFrame.value) flushFrameCells(currentFrame.value);
                 const rawProject = toRaw(project);
                 const rawSettings = toRaw(settings);
                 const rawSession = toRaw(session);
-                const { settings: _projectSettings, sessionState: _projectSessionState, ...projectData } = rawProject;
+                // Pixel data is serialized to PNG data URLs only here, at the I/O boundary.
+                const framesOut = rawProject.frames.map(f => {
+                    const cells = cellStore.get(f.id) || {};
+                    const layers = {};
+                    for (const k in cells) layers[k] = cells[k].toDataURL('image/png');
+                    return { id: f.id, layers, thumbnail: f.thumbnail || null };
+                });
                 const data = JSON.stringify({
-                    ...projectData,
+                    id: rawProject.id,
+                    meta: rawProject.meta,
+                    layers: rawProject.layers,
+                    frames: framesOut,
                     settings: rawSettings,
                     sessionState: {
                         colors: rawSession.colors,
@@ -2599,9 +2702,12 @@ const createAppInstance = () => createApp({
                         const {
                             settings: loadedSettings,
                             sessionState: loadedSessionState,
+                            frames: loadedFrames,
                             ...loadedProject
                         } = loaded;
-                        Object.assign(project, loadedProject);
+                        if (loadedProject.id) project.id = loadedProject.id;
+                        if (loadedProject.meta) Object.assign(project.meta, loadedProject.meta);
+                        if (Array.isArray(loadedProject.layers)) project.layers = loadedProject.layers;
 
                         // Restore settings/session from JSON
                         if (loadedSettings) {
@@ -2616,27 +2722,36 @@ const createAppInstance = () => createApp({
                         }
 
                         project.layers = project.layers.map(l => {
-                            if (l.id === 0) return {
-                                ...l,
-                                locked: false,
-                                type: 'draw'
-                            };
-                            return {
-                                ...l,
-                                locked: false,
-                                type: l.type === 'fill' ? 'draw' : l.type
-                            };
+                            if (l.id === 0) return { ...l, locked: false, type: 'draw' };
+                            return { ...l, locked: false, type: l.type === 'fill' ? 'draw' : l.type };
                         });
-                        if (!Array.isArray(project.frames)) project.frames = [];
-                        project.frames.forEach(f => normalizeFrame(f));
-                        if (project.frames.length === 0) ensureFrame(0);
+
+                        // Rebuild cells from the data URLs in the JSON.
+                        cellStore.clear();
+                        frameClipboardCells = null;
+                        const framesIn = Array.isArray(loadedFrames) ? loadedFrames : [];
+                        const frameMeta = [];
+                        for (const f of framesIn) {
+                            const dst = {};
+                            const layers = f.layers || {};
+                            for (const k in layers) {
+                                const surface = makeSurface(project.meta.width, project.meta.height);
+                                const img = await loadImageOrNull(layers[k]);
+                                if (img) surface.getContext('2d').drawImage(img, 0, 0);
+                                dst[k] = surface;
+                            }
+                            const id = f.id || generateUUID();
+                            cellStore.set(id, dst);
+                            frameMeta.push({ id, thumbnail: f.thumbnail || null });
+                        }
+                        project.frames = frameMeta;
+                        if (project.frames.length === 0) { project.frames = []; ensureFrame(0); }
                         session.currentFrameIndex = 0;
                         syncOnionLayerSelection();
-                        imageCache.clear();
+                        resetAllHistory();
                         await nextTick();
                         renderCurrentFrame();
-                        resetAllHistory();
-                        recordHistory(); // baseline
+                        updateHistoryState();
                         alert("Project loaded!");
                     } catch (err) {
                         alert("Failed to load project: " + err.message);
@@ -2727,7 +2842,8 @@ const createAppInstance = () => createApp({
                 // If selection active, anchor it first
                 await commitFloatingSelection();
 
-                recordHistory();
+                // No pixels are committed yet — the paste is a floating selection; the
+                // eventual anchor records the region-diff. (Ctrl+Z clears the float first.)
 
                 // Create floating layer from clipboard
                 session.selection.floatingData = session.clipboard.data;
@@ -2766,43 +2882,33 @@ const createAppInstance = () => createApp({
                 const frame = ensureFrame(session.currentFrameIndex);
                 if (!frame) return;
                 await commitFloatingSelection();
-                recordHistory(); // Flip is a pixel-level edit on the current frame -> undoable
 
                 const w = project.meta.width;
                 const h = project.meta.height;
                 const flipX = direction === 'horizontal' || direction === 'both';
                 const flipY = direction === 'vertical' || direction === 'both';
 
-                const flipLayerData = async (src) => {
-                    if (!src) return createTransparentData(w, h);
-                    // Solid color: fill and return (no-op for flip)
-                    if (typeof src === 'string' && src.startsWith('#')) {
-                        return createSolidColorData(w, h, src);
-                    }
+                // Flip is a pixel edit across all layers -> begin/commit captures the diff.
+                const layerIds = drawingLayers.value.map(l => l.id);
+                recordHistory(layerIds);
 
-                    try {
-                        const img = await loadImageCached(src);
-                        const off = document.createElement('canvas');
-                        off.width = w;
-                        off.height = h;
-                        const ctx = off.getContext('2d');
-                        ctx.save();
-                        ctx.translate(flipX ? w : 0, flipY ? h : 0);
-                        ctx.scale(flipX ? -1 : 1, flipY ? -1 : 1);
-                        ctx.drawImage(img, 0, 0);
-                        ctx.restore();
-                        return off.toDataURL();
-                    } catch (_) {
-                        return src; // If load fails, keep original
-                    }
-                };
-
-                for (const layer of project.layers) {
-                    frame.layers[layer.id] = await flipLayerData(frame.layers[layer.id]);
+                for (const layer of drawingLayers.value) {
+                    const ctx = getCtx(layer.id);
+                    const cvs = canvasRefs.value[layer.id];
+                    if (!ctx || !cvs) continue;
+                    const snap = makeSurface(w, h);
+                    snap.getContext('2d').drawImage(cvs, 0, 0);
+                    ctx.save();
+                    ctx.setTransform(1, 0, 0, 1, 0, 0);
+                    ctx.globalCompositeOperation = 'source-over';
+                    ctx.clearRect(0, 0, w, h);
+                    ctx.translate(flipX ? w : 0, flipY ? h : 0);
+                    ctx.scale(flipX ? -1 : 1, flipY ? -1 : 1);
+                    ctx.drawImage(snap, 0, 0);
+                    ctx.restore();
                 }
 
-                await renderCurrentFrame();
-                frame.thumbnail = await generateThumbnail(frame);
+                saveCurrentLayerToState();
             },
 
             // --- Drag & Drop Frames ---
@@ -2844,37 +2950,34 @@ const createAppInstance = () => createApp({
                 if (session.isPlaying) return;
                 await commitFloatingSelection();
                 const target = (idx ?? session.currentFrameIndex);
-                const frame = {
-                    id: generateUUID(),
-                    layers: {}
-                };
+                const frame = { id: generateUUID(), thumbnail: null };
                 normalizeFrame(frame);
-                frame.thumbnail = await generateThumbnail(frame);
+                frame.thumbnail = generateThumbnail(frame);
                 recordStructural();
                 project.frames.splice(target + 1, 0, frame);
                 frameContext.visible = false;
-                //triggerAutoSave();
             },
 
             copyFrame(idx) {
                 const frame = project.frames[idx];
                 if (!frame) return;
-                session.frameClipboard = JSON.parse(JSON.stringify(toRaw(frame)));
+                if (idx === session.currentFrameIndex) flushFrameCells(frame);
+                frameClipboardCells = copyCellSet(cellStore.get(frame.id) || {});
                 frameContext.visible = false;
             },
 
             async pasteFrame(idx) {
                 if (session.isPlaying) return;
-                if (!session.frameClipboard) return;
+                if (!frameClipboardCells) return;
                 await commitFloatingSelection();
                 const target = (idx ?? session.currentFrameIndex);
-                const cloned = JSON.parse(JSON.stringify(session.frameClipboard));
-                cloned.id = generateUUID();
+                const cloned = { id: generateUUID(), thumbnail: null };
+                cellStore.set(cloned.id, copyCellSet(frameClipboardCells));
                 normalizeFrame(cloned);
+                cloned.thumbnail = generateThumbnail(cloned);
                 recordStructural();
                 project.frames.splice(target + 1, 0, cloned);
                 frameContext.visible = false;
-                //triggerAutoSave();
             },
 
             clearSelection() {
@@ -2963,6 +3066,7 @@ const createAppInstance = () => createApp({
         let autoSaveTimer = null;
         const saveProjectSilent = async () => {
             const db = await dbPromise;
+            if (currentFrame.value) flushFrameCells(currentFrame.value);
             const rawProject = toRaw(project);
             const rawSettings = toRaw(settings);
             const rawSession = toRaw(session);
@@ -2982,18 +3086,14 @@ const createAppInstance = () => createApp({
                 modifiedAt: Date.now()
             };
 
-            // Transaction for atomic save
+            // Encode all cells first; an IDB transaction must not span non-IDB awaits.
+            const records = [];
+            for (const f of frames) records.push(await serializeFrameCells(f));
+
             const tx = db.transaction(['projects', 'frames'], 'readwrite');
-
-            // Save Meta
-            await tx.objectStore('projects').put(meta);
-
-            // Save Frames
+            tx.objectStore('projects').put(meta);
             const frameStore = tx.objectStore('frames');
-            for (const frame of frames) {
-                // frame object structure: { id, layers: { layerId: dataUrl } }
-                await frameStore.put(frame);
-            }
+            for (const r of records) frameStore.put(r);
 
             await tx.done;
         };
@@ -3008,36 +3108,9 @@ const createAppInstance = () => createApp({
             }
         };
 
-        // --- Decoded image cache (used by live render, onion skin and export) ---
-        // Bounded LRU: each layer edit produces a fresh data URL, so an unbounded map
-        // would grow without limit during a session. Keep only the most recent entries.
-        const imageCache = new Map();
-        const IMAGE_CACHE_LIMIT = 128;
-        const loadImageCached = (src) => {
-            if (imageCache.has(src)) {
-                // Mark as most-recently-used
-                const cached = imageCache.get(src);
-                imageCache.delete(src);
-                imageCache.set(src, cached);
-                return cached;
-            }
-            const promise = new Promise((resolve, reject) => {
-                const img = new Image();
-                img.onload = () => resolve(img);
-                img.onerror = () => reject(new Error('Failed to load image'));
-                img.src = src;
-            });
-            imageCache.set(src, promise);
-            // Evict oldest entries beyond the cap
-            while (imageCache.size > IMAGE_CACHE_LIMIT) {
-                const oldestKey = imageCache.keys().next().value;
-                imageCache.delete(oldestKey);
-            }
-            return promise;
-        };
 
         // Draw a frame onto a provided context while respecting layer visibility
-        const drawFrameToContext = async (ctx, frame) => {
+        const drawFrameToContext = (ctx, frame) => {
             const w = project.meta.width;
             const h = project.meta.height;
             ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -3045,25 +3118,9 @@ const createAppInstance = () => createApp({
             ctx.globalCompositeOperation = 'source-over';
             ctx.clearRect(0, 0, w, h);
 
-            normalizeFrame(frame);
-
             for (const layer of drawingLayers.value) {
                 if (!layer.visible) continue;
-                const src = frame.layers?.[layer.id];
-                if (!src) continue;
-
-                if (typeof src === 'string' && src.startsWith('#')) {
-                    ctx.fillStyle = src;
-                    ctx.fillRect(0, 0, w, h);
-                    continue;
-                }
-
-                try {
-                    const img = await loadImageCached(src);
-                    ctx.drawImage(img, 0, 0);
-                } catch (err) {
-                    console.warn('Layer render skipped (load failed):', layer.id, err);
-                }
+                ctx.drawImage(cellSurface(frame, layer.id), 0, 0);
             }
         };
 
@@ -3264,12 +3321,12 @@ const createAppInstance = () => createApp({
         const loadProjectFromMeta = async (loadMeta) => {
             const db = await dbPromise;
             const frameIds = Array.isArray(loadMeta.frames) ? loadMeta.frames : [];
-            const loadedFrames = await Promise.all(frameIds.map(fid => db.get('frames', fid)));
-            const validFrames = loadedFrames.filter(f => f);
+            const records = (await Promise.all(frameIds.map(fid => db.get('frames', fid)))).filter(Boolean);
 
             const {
                 settings: loadedSettings,
                 sessionState: loadedSessionState,
+                frames: _frameIds,
                 ...loadedProject
             } = loadMeta;
             Object.assign(project, loadedProject);
@@ -3280,13 +3337,17 @@ const createAppInstance = () => createApp({
                 if (loadedSessionState.brush) Object.assign(session.brush, loadedSessionState.brush);
             }
 
-            project.frames = validFrames;
             project.layers = project.layers.map(l => ({
                 ...l,
                 locked: false,
                 type: l.type === 'fill' ? 'draw' : l.type
             }));
-            project.frames.forEach(f => normalizeFrame(f));
+
+            // Rebuild cells from stored PNG blobs (project.meta is already set above).
+            cellStore.clear();
+            frameClipboardCells = null;
+            for (const rec of records) await deserializeFrameCells(rec);
+            project.frames = records.map(rec => ({ id: rec.id, thumbnail: rec.thumbnail || null }));
             if (project.frames.length === 0) {
                 project.frames = [];
                 ensureFrame(0);
@@ -3295,9 +3356,8 @@ const createAppInstance = () => createApp({
             session.currentFrameIndex = 0;
             syncOnionLayerSelection();
             resetAllHistory();
-            imageCache.clear(); // Decoded images from the previous project are no longer needed
             await nextTick();
-            await renderCurrentFrame();
+            renderCurrentFrame();
             updateHistoryState();
         };
 
@@ -3407,7 +3467,7 @@ const createAppInstance = () => createApp({
                             if (e.shiftKey) {
 																redo();
                             }else {
-																actions.clearSelection();
+																if (session.activeScope === "canvas") actions.clearSelection();
 																undo();
 														}
                         }
@@ -3501,6 +3561,15 @@ const createAppInstance = () => createApp({
             window.addEventListener('click', () => {
                 frameContext.visible = false;
             });
+
+            // Route Ctrl+Z/Y to the area last touched: the timeline bar vs everything else.
+            window.addEventListener('pointerdown', (e) => {
+                const scope = (e.target.closest && e.target.closest('.timeline')) ? 'timeline' : 'canvas';
+                if (session.activeScope !== scope) {
+                    session.activeScope = scope;
+                    updateHistoryState();
+                }
+            }, true);
 
             window.addEventListener('pointerup', handleGlobalPointerRelease);
             window.addEventListener('pointercancel', handleGlobalPointerRelease);
