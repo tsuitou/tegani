@@ -411,6 +411,7 @@
         <div class="header-title"><i class="fas fa-film"></i> tegani </div>
         <div class="menu-item" @click="openNewProjectModal"><i class="fas fa-file"></i> New</div>
         <div class="menu-item" @click="actions.saveProject()"><i class="fas fa-save"></i> Save</div>
+        <div class="menu-item" @click="openProjectsModal"><i class="fas fa-folder-open"></i> Projects</div>
         <div class="menu-separator"></div>
         <div class="menu-item" @click="exportAPNG"><i class="fas fa-file-video"></i> Export APNG</div>
         <div class="menu-item" @click="exportZIP"><i class="fas fa-file-archive"></i> Export ZIP</div>
@@ -435,7 +436,7 @@
             </div>
         <div class="timeline-settings">
             <label>FPS:</label>
-            <input class="input-fps" type="number" v-model.number="project.meta.fps" min="1" max="60">
+            <input class="input-fps" type="number" v-model.number="project.meta.fps" min="1" max="60" @change="project.meta.fps = getSafeFps()">
             <div class="btn-transport" :class="{active: settings.onionSkin.enabled}" @click="settings.onionSkin.enabled = !settings.onionSkin.enabled" title="Onion Skin">
                 <i class="fas fa-layer-group"></i>
             </div>
@@ -570,13 +571,18 @@
     <div class="panels">
         <!-- Undo/Redo Buttons -->
         <div class="panel-section history-controls" style="border-bottom: 1px solid #222; padding: 6px 10px; display: flex; align-items: center; justify-content: space-between; gap: 8px;">
-            <div class="panel-header" style="margin-bottom: 0;">History</div>
             <div style="display: flex; gap: 6px;">
                 <button class="btn-history" :disabled="!historyState.canUndo" @click="undo" title="Undo (Ctrl+Z)">
                     <i class="fas fa-undo"></i>
                 </button>
                 <button class="btn-history" :disabled="!historyState.canRedo" @click="redo" title="Redo (Ctrl+Y)">
                     <i class="fas fa-redo"></i>
+                </button>
+                <button class="btn-history" @click="actions.flipFrame('horizontal')" title="Flip Horizontal (Ctrl+H)">
+                    <i class="fas fa-arrows-alt-h"></i>
+                </button>
+                <button class="btn-history" @click="actions.flipFrame('vertical')" title="Flip Vertical">
+                    <i class="fas fa-arrows-alt-v"></i>
                 </button>
             </div>
         </div>
@@ -606,7 +612,7 @@
                 <div class="color-box active" :style="{backgroundColor: session.colors.primary}">
                     <input type="color" v-model="session.colors.primary">
                 </div>
-                <div class="color-box" :style="{backgroundColor: session.colors.secondary}" @click="swapColors">
+                <div class="color-box" :style="{backgroundColor: session.colors.secondary}">
                     <input type="color" v-model="session.colors.secondary">
                 </div>
                 <div style="font-size: 20px; align-self: center; cursor: pointer;" @click="swapColors">
@@ -770,6 +776,44 @@
         </div>
     </div>
 
+    <!-- Projects Manager -->
+    <div v-if="showProjectsModal" class="modal-overlay" @click.self="showProjectsModal=false">
+        <div class="modal" style="width: 600px;">
+            <h3><i class="fas fa-folder-open"></i> Projects</h3>
+            <div style="font-size: 0.8rem; color:#888; margin-bottom: 12px;">
+                ブラウザ内 (IndexedDB) に保存されたプロジェクト一覧です。読み込み・削除ができます。
+            </div>
+            <div v-if="projectsList.length === 0" style="color:#888; text-align:center; padding: 20px 0;">
+                保存されたプロジェクトはありません。
+            </div>
+            <div v-else class="projects-list" style="max-height: 50vh; overflow-y: auto; display:flex; flex-direction:column; gap:6px;">
+                <div v-for="p in projectsList" :key="p.id"
+                    class="project-row"
+                    style="display:flex; align-items:center; gap:10px; background:#2a2a2a; border:1px solid #444; border-radius:6px; padding:10px;"
+                    :style="{ borderColor: p.isCurrent ? 'var(--accent)' : '#444' }">
+                    <div style="flex:1; min-width:0;">
+                        <div style="font-weight:bold; display:flex; align-items:center; gap:8px;">
+                            {{ p.title }}
+                            <span v-if="p.isCurrent" style="font-size:0.7rem; color:var(--accent); border:1px solid var(--accent); border-radius:3px; padding:1px 5px;">現在</span>
+                        </div>
+                        <div style="font-size:0.75rem; color:#888; margin-top:3px;">
+                            {{ p.width }}×{{ p.height }} · {{ p.frameCount }} frames · {{ formatDate(p.modifiedAt) }}
+                        </div>
+                    </div>
+                    <button class="btn btn-secondary" style="padding:6px 12px;" :disabled="p.isCurrent" @click="loadProjectById(p.id)">
+                        <i class="fas fa-folder-open"></i> Open
+                    </button>
+                    <button class="btn" style="background:#e74c3c; color:#fff; padding:6px 12px;" @click="deleteProjectById(p.id)">
+                        <i class="fas fa-trash-alt"></i>
+                    </button>
+                </div>
+            </div>
+            <div class="modal-actions">
+                <button class="btn btn-secondary" @click="showProjectsModal=false">Close</button>
+            </div>
+        </div>
+    </div>
+
 </div>
 
 <script>
@@ -880,7 +924,8 @@ const createDefaultSession = () => ({
         initialPos: null,
         dirty: false
     },
-    clipboard: null,
+    clipboard: null,        // image/selection clipboard (Ctrl+C/X/V)
+    frameClipboard: null,   // whole-frame clipboard (timeline context menu)
     isDrawing: false,
     isRightClick: false,
     isPanning: false,
@@ -964,15 +1009,8 @@ const createAppInstance = () => createApp({
         });
 
         const updateHistoryState = () => {
-            const frame = currentFrame.value;
-            if (!frame) {
-                historyState.canUndo = false;
-                historyState.canRedo = false;
-                return;
-            }
-            const stacks = history.frames[frame.id];
-            historyState.canUndo = !!(stacks && stacks.undo.length > 0);
-            historyState.canRedo = !!(stacks && stacks.redo.length > 0);
+            historyState.canUndo = history.undo.length > 0;
+            historyState.canRedo = history.redo.length > 0;
         };
 
         const session = reactive(createDefaultSession());
@@ -993,11 +1031,14 @@ const createAppInstance = () => createApp({
             }
         });
 
-        // Use standard object for history to avoid reactivity overhead with large snapshots
+        // Single global, time-ordered history timeline.
+        // Each entry is one of:
+        //   { type: 'pixel', frameId, snap }            -- single-frame deep clone (drawing edits)
+        //   { type: 'structural', order: [...frames], index } -- frame list ordering (add/delete/reorder)
+        // Using one stack keeps undo/redo ordering correct across mixed edit kinds.
         const history = {
-            // frameId -> { undo: [], redo: [] }
-            frames: {},
-            limit: 4
+            undo: [],
+            redo: []
         };
 
         const settings = reactive(cloneDefaultSettings());
@@ -1028,23 +1069,16 @@ const createAppInstance = () => createApp({
             else session.brush.penSize = val;
         };
 
-        const getUndoLimit = () => settings.undoLimit || history.limit || 4;
-        const ensureFrameHistory = (frameId) => {
-            if (!frameId) return null;
-            if (!history.frames[frameId]) {
-                history.frames[frameId] = {
-                    undo: [],
-                    redo: []
-                };
-            }
-            return history.frames[frameId];
+        const getUndoLimit = () => Math.max(1, settings.undoLimit || 20);
+        const cloneFrameData = (frame) => JSON.parse(JSON.stringify(toRaw(frame)));
+        const trimUndoStack = () => {
+            const limit = getUndoLimit();
+            while (history.undo.length > limit) history.undo.shift();
         };
         const resetAllHistory = () => {
-            history.frames = {};
-        };
-        const clearFrameHistory = (frameId) => {
-            if (!frameId) return;
-            delete history.frames[frameId];
+            history.undo = [];
+            history.redo = [];
+            updateHistoryState();
         };
 
         // Pen smoothing bounds (UI strength 1-10 maps into this range)
@@ -1238,57 +1272,53 @@ const createAppInstance = () => createApp({
             return project.frames[idx];
         };
 
+        // Monotonic token: each render bumps it; an in-flight render that becomes stale
+        // (because a newer render started during its async image loads) aborts before painting.
+        let renderToken = 0;
         const renderCurrentFrame = async () => {
             ensureFrame(session.currentFrameIndex);
             if (!currentFrame.value) return;
             // If canvases are not yet mounted (e.g., during remount), skip
             if (!canvasBg.value || !canvasTemp.value) return;
 
-            // 1. Preload Phase: Load all images first to avoid flickering
+            const myToken = ++renderToken;
+            const frame = currentFrame.value; // Capture: index may change during awaits
+            const w = project.meta.width;
+            const h = project.meta.height;
+
+            // 1. Preload Phase: decode all layer images (cached/decoded once per data URL)
             const loadedImages = new Map();
-            const loadPromises = [];
+            await Promise.all(drawingLayers.value.map(async (layer) => {
+                const src = frame.layers[layer.id];
+                if (!src || (typeof src === 'string' && src.startsWith('#'))) return;
+                try {
+                    const img = await loadImageCached(src);
+                    loadedImages.set(layer.id, img);
+                } catch (_) {
+                    // Skip layers whose image failed to load
+                }
+            }));
 
-            for (const layer of drawingLayers.value) {
-                const src = currentFrame.value.layers[layer.id];
-                if (!src || (typeof src === 'string' && src.startsWith('#'))) continue;
-
-                const p = new Promise(resolve => {
-                    const img = new Image();
-                    img.onload = () => resolve({
-                        id: layer.id,
-                        img
-                    });
-                    img.onerror = () => resolve({
-                        id: layer.id,
-                        img: null
-                    });
-                    img.src = src;
-                });
-                loadPromises.push(p);
-            }
-
-            // Wait for all images to be ready
-            const results = await Promise.all(loadPromises);
-            results.forEach(res => {
-                if (res.img) loadedImages.set(res.id, res.img);
-            });
+            // A newer render superseded this one while we were decoding; abort to avoid
+            // painting a stale frame over the current one.
+            if (myToken !== renderToken) return;
 
             // 2. Render Phase: Draw into offscreen buffers, then copy once to visible canvases
             const bgCtx = canvasBg.value?.getContext('2d');
             if (!bgCtx) return;
-            bgCtx.clearRect(0, 0, project.meta.width, project.meta.height);
+            bgCtx.clearRect(0, 0, w, h);
 
             drawingLayers.value.forEach(layer => {
                 const buffer = getLayerBuffer(layer.id);
                 const bufCtx = buffer.getContext('2d');
                 if (!bufCtx) return;
-                bufCtx.clearRect(0, 0, project.meta.width, project.meta.height);
+                bufCtx.clearRect(0, 0, w, h);
 
-                const src = currentFrame.value.layers[layer.id];
+                const src = frame.layers[layer.id];
                 if (!src) return;
                 if (typeof src === 'string' && src.startsWith('#')) {
                     bufCtx.fillStyle = src;
-                    bufCtx.fillRect(0, 0, project.meta.width, project.meta.height);
+                    bufCtx.fillRect(0, 0, w, h);
                 } else {
                     const img = loadedImages.get(layer.id);
                     if (img) {
@@ -1308,6 +1338,7 @@ const createAppInstance = () => createApp({
             }
 
             await renderOnionSkin();
+            if (myToken !== renderToken) return;
             renderSelectionOverlay();
         };
 
@@ -1328,33 +1359,7 @@ const createAppInstance = () => createApp({
 
         };
 
-        // --- History Management (draw-only) ---
-        const snapshotCurrentFrame = () => {
-            if (!currentFrame.value) return null;
-            try {
-                return JSON.parse(JSON.stringify(project.frames[session.currentFrameIndex]));
-            } catch (e) {
-                console.error("Snapshot failed", e);
-                return null;
-            }
-        };
-
-        const restoreFrameSnapshot = async (snap) => {
-            if (!snap) return;
-            
-            // Handle legacy history format (direct frame object) vs new format ({frame, selection})
-            const frameData = snap.frame || snap;
-
-            if (!project.frames[session.currentFrameIndex]) {
-                project.frames[session.currentFrameIndex] = JSON.parse(JSON.stringify(frameData));
-            } else {
-                project.frames[session.currentFrameIndex] = frameData;
-            }
-            await nextTick();
-            normalizeFrame(project.frames[session.currentFrameIndex]);
-            await renderCurrentFrame();
-        };
-
+        // --- History Management ---
         const resetInteractionState = () => {
             session.isDrawing = false;
             session.isPanning = false;
@@ -1367,23 +1372,62 @@ const createAppInstance = () => createApp({
             lastStrokeTime = null;
         };
 
+        // Record a pixel-level edit on the current frame (before mutation).
         const recordHistory = () => {
             if (session.isPlaying) return;
             const frame = project.frames[session.currentFrameIndex];
             if (!frame) return;
-            const snap = snapshotCurrentFrame();
-            if (!snap) return;
-
-            const stacks = ensureFrameHistory(frame.id);
-            if (!stacks) return;
-
-            stacks.undo.push(snap);
-
-            // Respect custom Undo Limit per frame
-            const limit = getUndoLimit();
-            if (stacks.undo.length > limit) stacks.undo.shift();
-            stacks.redo = []; // Clear redo on new action
+            let snap;
+            try {
+                snap = cloneFrameData(frame);
+            } catch (e) {
+                console.error("Snapshot failed", e);
+                return;
+            }
+            history.undo.push({ type: 'pixel', frameId: frame.id, snap });
+            trimUndoStack();
+            history.redo = []; // Clear redo on new action
             updateHistoryState();
+        };
+
+        // Record a structural edit on the frame list (before mutation):
+        // add / delete / insert / paste / reorder frames.
+        const recordStructural = () => {
+            if (session.isPlaying) return;
+            history.undo.push({
+                type: 'structural',
+                order: project.frames.slice(),
+                index: session.currentFrameIndex
+            });
+            trimUndoStack();
+            history.redo = [];
+            updateHistoryState();
+        };
+
+        // Apply a history entry; returns the inverse entry (current state) to push on the opposite stack.
+        const applyHistoryEntry = async (entry) => {
+            if (entry.type === 'pixel') {
+                const idx = project.frames.findIndex(f => f.id === entry.frameId);
+                if (idx === -1) return null; // Frame no longer exists (e.g. structurally removed); skip
+                session.currentFrameIndex = idx;
+                const inverse = { type: 'pixel', frameId: entry.frameId, snap: cloneFrameData(project.frames[idx]) };
+                project.frames[idx] = entry.snap;
+                await nextTick();
+                normalizeFrame(project.frames[idx]);
+                await renderCurrentFrame();
+                return inverse;
+            }
+            // structural
+            const inverse = {
+                type: 'structural',
+                order: project.frames.slice(),
+                index: session.currentFrameIndex
+            };
+            project.frames.splice(0, project.frames.length, ...entry.order);
+            session.currentFrameIndex = Math.max(0, Math.min(entry.index, project.frames.length - 1));
+            await nextTick();
+            await renderCurrentFrame();
+            return inverse;
         };
 
         const resetSelectionState = () => {
@@ -1402,39 +1446,23 @@ const createAppInstance = () => createApp({
         const undo = async () => {
             resetInteractionState();
             if (session.isPlaying) return;
-            const frame = currentFrame.value;
-            if (!frame) return;
-            const stacks = ensureFrameHistory(frame.id);
-            if (!stacks || stacks.undo.length === 0) return;
-
-            const currentSnap = snapshotCurrentFrame();
-            if (currentSnap) {
-                stacks.redo.push(currentSnap);
-            }
-
-            const prev = stacks.undo.pop();
-            await restoreFrameSnapshot(prev);
+            if (history.undo.length === 0) return;
+            const entry = history.undo.pop();
+            const inverse = await applyHistoryEntry(entry);
+            if (inverse) history.redo.push(inverse);
             updateHistoryState();
         };
 
         const redo = async () => {
             resetInteractionState();
             if (session.isPlaying) return;
-            const frame = currentFrame.value;
-            if (!frame) return;
-            const stacks = ensureFrameHistory(frame.id);
-            if (!stacks || stacks.redo.length === 0) return;
-
-            const currentSnap = snapshotCurrentFrame();
-            if (currentSnap) {
-                stacks.undo.push(currentSnap);
-
-                const limit = getUndoLimit();
-                if (stacks.undo.length > limit) stacks.undo.shift();
+            if (history.redo.length === 0) return;
+            const entry = history.redo.pop();
+            const inverse = await applyHistoryEntry(entry);
+            if (inverse) {
+                history.undo.push(inverse);
+                trimUndoStack();
             }
-
-            const next = stacks.redo.pop();
-            await restoreFrameSnapshot(next);
             updateHistoryState();
         };
 
@@ -1984,8 +2012,10 @@ const createAppInstance = () => createApp({
                     offCtx.fillStyle = src;
                     offCtx.fillRect(0, 0, off.width, off.height);
                 } else {
-                    const img = await loadImageOrNull(src);
-                    if (img) offCtx.drawImage(img, 0, 0);
+                    try {
+                        const img = await loadImageCached(src);
+                        if (img) offCtx.drawImage(img, 0, 0);
+                    } catch (_) {}
                 }
             }
 
@@ -2053,7 +2083,7 @@ const createAppInstance = () => createApp({
                 const worldPt = getPointerPos(e);
 
                 const delta = -Math.sign(e.deltaY) * 0.1;
-                const newZoom = Math.max(0.1, Math.min(5.0, viewport.zoom + delta));
+                const newZoom = Math.max(0.1, Math.min(10.0, viewport.zoom + delta));
 
                 // Adjust pan to keep the same world point under the cursor
                 const screenX = viewport.pan.x + worldPt.x * viewport.zoom;
@@ -2383,7 +2413,6 @@ const createAppInstance = () => createApp({
                     settings.backgroundColor = metaOverrides.backgroundColor || settings.backgroundColor;
                 }
                 syncOnionLayerSelection();
-                resetAllHistory();
                 session.selection.active = false;
                 session.selection.path = [];
                 session.selection.originPath = null;
@@ -2399,6 +2428,9 @@ const createAppInstance = () => createApp({
                 session.currentFrameIndex = 0;
                 await nextTick();
                 renderCurrentFrame();
+                // Clear any history accumulated during setup (e.g. the structural entry
+                // recorded by addFrame), then lay down a single clean baseline.
+                resetAllHistory();
                 recordHistory(); // baseline
                 // Reset Viewport
                 viewport.zoom = 1.0;
@@ -2429,7 +2461,9 @@ const createAppInstance = () => createApp({
                         layers: layersSeed
                     };
                 }
-                ensureFrameHistory(newFrame.id);
+                normalizeFrame(newFrame);
+                newFrame.thumbnail = await generateThumbnail(newFrame);
+                recordStructural();
                 const insertAt = insertMode === 'end'
                     ? project.frames.length
                     : Math.min(project.frames.length, session.currentFrameIndex + 1);
@@ -2442,8 +2476,8 @@ const createAppInstance = () => createApp({
                 if (session.isPlaying) return;
                 if (project.frames.length <= 1) return;
                 await commitFloatingSelection();
-                const removed = project.frames.splice(idx, 1);
-                if (removed[0]) clearFrameHistory(removed[0].id);
+                recordStructural();
+                project.frames.splice(idx, 1);
                 if (session.currentFrameIndex >= project.frames.length) {
                     session.currentFrameIndex = project.frames.length - 1;
                 }
@@ -2458,7 +2492,6 @@ const createAppInstance = () => createApp({
                 if (idx < 0 || idx >= project.frames.length) return;
                 session.currentFrameIndex = idx;
                 ensureFrame(idx);
-                ensureFrameHistory(project.frames[idx]?.id);
                 await renderCurrentFrame();
                 updateHistoryState();
             },
@@ -2482,9 +2515,9 @@ const createAppInstance = () => createApp({
 
             adjustBrushSize(delta) {
                 if (session.tool === 'eraser') {
-                    session.brush.eraserSize = Math.max(1, Math.min(100, session.brush.eraserSize + delta));
+                    session.brush.eraserSize = Math.max(1, Math.min(48, session.brush.eraserSize + delta));
                 } else {
-                    session.brush.penSize = Math.max(1, Math.min(100, session.brush.penSize + delta));
+                    session.brush.penSize = Math.max(1, Math.min(48, session.brush.penSize + delta));
                 }
             },
 
@@ -2594,7 +2627,12 @@ const createAppInstance = () => createApp({
                                 type: l.type === 'fill' ? 'draw' : l.type
                             };
                         });
+                        if (!Array.isArray(project.frames)) project.frames = [];
+                        project.frames.forEach(f => normalizeFrame(f));
+                        if (project.frames.length === 0) ensureFrame(0);
+                        session.currentFrameIndex = 0;
                         syncOnionLayerSelection();
+                        imageCache.clear();
                         await nextTick();
                         renderCurrentFrame();
                         resetAllHistory();
@@ -2728,6 +2766,7 @@ const createAppInstance = () => createApp({
                 const frame = ensureFrame(session.currentFrameIndex);
                 if (!frame) return;
                 await commitFloatingSelection();
+                recordHistory(); // Flip is a pixel-level edit on the current frame -> undoable
 
                 const w = project.meta.width;
                 const h = project.meta.height;
@@ -2788,9 +2827,11 @@ const createAppInstance = () => createApp({
             async handleDrop(e, idx) {
                 if (session.isPlaying) return;
                 await commitFloatingSelection();
-                const fromIdx = parseInt(e.dataTransfer.getData('text/plain'));
-                if (fromIdx === idx) return;
+                const fromIdx = parseInt(e.dataTransfer.getData('text/plain'), 10);
+                if (!Number.isInteger(fromIdx) || fromIdx === idx) return;
+                if (fromIdx < 0 || fromIdx >= project.frames.length) return;
 
+                recordStructural();
                 const item = project.frames[fromIdx];
                 project.frames.splice(fromIdx, 1);
                 project.frames.splice(idx, 0, item);
@@ -2805,11 +2846,11 @@ const createAppInstance = () => createApp({
                 const target = (idx ?? session.currentFrameIndex);
                 const frame = {
                     id: generateUUID(),
-                    layers: {
-                        0: "#FFFFFF"
-                    }
+                    layers: {}
                 };
-                ensureFrameHistory(frame.id);
+                normalizeFrame(frame);
+                frame.thumbnail = await generateThumbnail(frame);
+                recordStructural();
                 project.frames.splice(target + 1, 0, frame);
                 frameContext.visible = false;
                 //triggerAutoSave();
@@ -2818,21 +2859,19 @@ const createAppInstance = () => createApp({
             copyFrame(idx) {
                 const frame = project.frames[idx];
                 if (!frame) return;
-                session.clipboard = {
-                    type: 'frame',
-                    data: JSON.parse(JSON.stringify(frame))
-                };
+                session.frameClipboard = JSON.parse(JSON.stringify(toRaw(frame)));
                 frameContext.visible = false;
             },
 
             async pasteFrame(idx) {
                 if (session.isPlaying) return;
-                if (!session.clipboard || session.clipboard.type !== 'frame') return;
+                if (!session.frameClipboard) return;
                 await commitFloatingSelection();
                 const target = (idx ?? session.currentFrameIndex);
-                const cloned = JSON.parse(JSON.stringify(session.clipboard.data));
+                const cloned = JSON.parse(JSON.stringify(session.frameClipboard));
                 cloned.id = generateUUID();
-                ensureFrameHistory(cloned.id);
+                normalizeFrame(cloned);
+                recordStructural();
                 project.frames.splice(target + 1, 0, cloned);
                 frameContext.visible = false;
                 //triggerAutoSave();
@@ -2854,11 +2893,23 @@ const createAppInstance = () => createApp({
             },
 
             async confirmNewProject() {
+                const clampInt = (v, lo, hi, def) => {
+                    let n = Math.round(Number(v));
+                    if (!Number.isFinite(n)) n = def;
+                    return Math.max(lo, Math.min(hi, n));
+                };
+                const width = clampInt(newProjectForm.width, 64, 4096, 800);
+                const height = clampInt(newProjectForm.height, 64, 4096, 600);
+                const fps = clampInt(newProjectForm.fps, 1, 60, 8);
+                // Reflect the clamped values back into the form for consistency
+                newProjectForm.width = width;
+                newProjectForm.height = height;
+                newProjectForm.fps = fps;
                 showNewProjectModal.value = false;
                 await actions.initProject({
-                    width: newProjectForm.width,
-                    height: newProjectForm.height,
-                    fps: newProjectForm.fps,
+                    width,
+                    height,
+                    fps,
                     backgroundColor: newProjectForm.backgroundColor || settings.backgroundColor
                 });
                 triggerAutoSave();
@@ -2889,18 +2940,23 @@ const createAppInstance = () => createApp({
         };
 
         // --- Playback Loop ---
+        const getSafeFps = () => {
+            const fps = Math.round(Number(project.meta.fps));
+            return Number.isFinite(fps) ? Math.max(1, Math.min(60, fps)) : 8;
+        };
         const playLoop = () => {
             if (!session.isPlaying) return;
 
             setTimeout(() => {
                 requestAnimationFrame(() => {
+                    if (!session.isPlaying) return;
                     let next = session.currentFrameIndex + 1;
                     if (next >= project.frames.length) next = 0;
                     session.currentFrameIndex = next;
                     renderCurrentFrame();
                     if (session.isPlaying) playLoop();
                 });
-            }, 1000 / project.meta.fps);
+            }, 1000 / getSafeFps());
         };
 
         // --- Auto Save & Persistence ---
@@ -2952,18 +3008,32 @@ const createAppInstance = () => createApp({
             }
         };
 
-        // --- Export ---
+        // --- Decoded image cache (used by live render, onion skin and export) ---
+        // Bounded LRU: each layer edit produces a fresh data URL, so an unbounded map
+        // would grow without limit during a session. Keep only the most recent entries.
         const imageCache = new Map();
+        const IMAGE_CACHE_LIMIT = 128;
         const loadImageCached = (src) => {
-            if (!imageCache.has(src)) {
-                imageCache.set(src, new Promise((resolve, reject) => {
-                    const img = new Image();
-                    img.onload = () => resolve(img);
-                    img.onerror = () => reject(new Error('Failed to load image'));
-                    img.src = src;
-                }));
+            if (imageCache.has(src)) {
+                // Mark as most-recently-used
+                const cached = imageCache.get(src);
+                imageCache.delete(src);
+                imageCache.set(src, cached);
+                return cached;
             }
-            return imageCache.get(src);
+            const promise = new Promise((resolve, reject) => {
+                const img = new Image();
+                img.onload = () => resolve(img);
+                img.onerror = () => reject(new Error('Failed to load image'));
+                img.src = src;
+            });
+            imageCache.set(src, promise);
+            // Evict oldest entries beyond the cap
+            while (imageCache.size > IMAGE_CACHE_LIMIT) {
+                const oldestKey = imageCache.keys().next().value;
+                imageCache.delete(oldestKey);
+            }
+            return promise;
         };
 
         // Draw a frame onto a provided context while respecting layer visibility
@@ -3025,7 +3095,7 @@ const createAppInstance = () => createApp({
                     bufs.push(new Uint8Array(data).buffer);
                 }
 
-                const delays = project.frames.map(() => Math.max(1, Math.round(1000 / project.meta.fps)));
+                const delays = project.frames.map(() => Math.max(1, Math.round(1000 / getSafeFps())));
                 const apng = UPNG.encode(bufs, w, h, 0, delays);
 
                 const blob = new Blob([apng], { type: "image/png" });
@@ -3189,6 +3259,118 @@ const createAppInstance = () => createApp({
             return frame.thumbnail ? `url(${frame.thumbnail})` : 'none';
         };
 
+        // --- Project loading & management ---
+        // Restore a stored project (meta + frames) into the live reactive state.
+        const loadProjectFromMeta = async (loadMeta) => {
+            const db = await dbPromise;
+            const frameIds = Array.isArray(loadMeta.frames) ? loadMeta.frames : [];
+            const loadedFrames = await Promise.all(frameIds.map(fid => db.get('frames', fid)));
+            const validFrames = loadedFrames.filter(f => f);
+
+            const {
+                settings: loadedSettings,
+                sessionState: loadedSessionState,
+                ...loadedProject
+            } = loadMeta;
+            Object.assign(project, loadedProject);
+
+            if (loadedSettings) Object.assign(settings, loadedSettings);
+            if (loadedSessionState) {
+                if (loadedSessionState.colors) Object.assign(session.colors, loadedSessionState.colors);
+                if (loadedSessionState.brush) Object.assign(session.brush, loadedSessionState.brush);
+            }
+
+            project.frames = validFrames;
+            project.layers = project.layers.map(l => ({
+                ...l,
+                locked: false,
+                type: l.type === 'fill' ? 'draw' : l.type
+            }));
+            project.frames.forEach(f => normalizeFrame(f));
+            if (project.frames.length === 0) {
+                project.frames = [];
+                ensureFrame(0);
+            }
+
+            session.currentFrameIndex = 0;
+            syncOnionLayerSelection();
+            resetAllHistory();
+            imageCache.clear(); // Decoded images from the previous project are no longer needed
+            await nextTick();
+            await renderCurrentFrame();
+            updateHistoryState();
+        };
+
+        const showProjectsModal = ref(false);
+        const projectsList = ref([]);
+        const formatDate = (ts) => {
+            if (!ts) return '-';
+            try {
+                return new Date(ts).toLocaleString();
+            } catch (_) {
+                return '-';
+            }
+        };
+        const refreshProjectsList = async () => {
+            const db = await dbPromise;
+            const all = await db.getAll('projects');
+            projectsList.value = all.map(m => ({
+                id: m.id,
+                title: (m.meta && m.meta.title) || 'Untitled',
+                width: m.meta?.width,
+                height: m.meta?.height,
+                fps: m.meta?.fps,
+                frameCount: Array.isArray(m.frames) ? m.frames.length : 0,
+                modifiedAt: m.modifiedAt || m.meta?.modifiedAt || m.meta?.createdAt || 0,
+                isCurrent: m.id === project.id
+            })).sort((a, b) => b.modifiedAt - a.modifiedAt);
+        };
+        const openProjectsModal = async () => {
+            await refreshProjectsList();
+            showProjectsModal.value = true;
+        };
+        const loadProjectById = async (id) => {
+            if (id === project.id) {
+                showProjectsModal.value = false;
+                return;
+            }
+            const db = await dbPromise;
+            const meta = await db.get('projects', id);
+            if (!meta) return;
+            await commitFloatingSelection();
+            await loadProjectFromMeta(meta);
+            showProjectsModal.value = false;
+        };
+        const deleteProjectById = async (id) => {
+            if (!confirm('このプロジェクトを削除しますか？この操作は元に戻せません。')) return;
+            const db = await dbPromise;
+            const target = await db.get('projects', id);
+            if (!target) return;
+
+            // Preserve frame records still referenced by other projects (defensive).
+            const all = await db.getAll('projects');
+            const keep = new Set();
+            all.forEach(m => {
+                if (m.id !== id && Array.isArray(m.frames)) m.frames.forEach(fid => keep.add(fid));
+            });
+
+            const tx = db.transaction(['projects', 'frames'], 'readwrite');
+            await tx.objectStore('projects').delete(id);
+            const frameStore = tx.objectStore('frames');
+            if (Array.isArray(target.frames)) {
+                for (const fid of target.frames) {
+                    if (!keep.has(fid)) await frameStore.delete(fid);
+                }
+            }
+            await tx.done;
+
+            await refreshProjectsList();
+            // If we deleted the project currently open, start a fresh one.
+            if (id === project.id) {
+                await actions.initProject();
+            }
+        };
+
         // --- Lifecycle & Shortcuts ---
         onMounted(async () => {
             // Load latest project or init
@@ -3196,50 +3378,11 @@ const createAppInstance = () => createApp({
             const savedProjects = await db.getAll('projects');
 
             if (savedProjects.length > 0) {
-                // Get latest meta
+                // Load the most-recently-modified project.
                 const loadMeta = savedProjects
                     .slice()
                     .sort((a, b) => (b.modifiedAt || b.meta?.modifiedAt || b.meta?.createdAt || 0) - (a.modifiedAt || a.meta?.modifiedAt || a.meta?.createdAt || 0))[0];
-
-                // Restore frames from 'frames' store
-                // meta.frames contains list of frame IDs
-                const frameIds = Array.isArray(loadMeta.frames) ? loadMeta.frames : [];
-                const framePromises = frameIds.map(fid => db.get('frames', fid));
-                const loadedFrames = await Promise.all(framePromises);
-
-                // Filter out missing frames just in case
-                const validFrames = loadedFrames.filter(f => f);
-
-                const {
-                    settings: loadedSettings,
-                    sessionState: loadedSessionState,
-                    ...loadedProject
-                } = loadMeta;
-                Object.assign(project, loadedProject);
-
-                // Restore settings and session
-                if (loadedSettings) {
-                    Object.assign(settings, loadedSettings);
-                }
-                if (loadedSessionState) {
-                    if (loadedSessionState.colors) Object.assign(session.colors, loadedSessionState.colors);
-                    if (loadedSessionState.brush) Object.assign(session.brush, loadedSessionState.brush);
-                }
-
-                project.frames = validFrames; // Assign restored frames
-
-                project.layers = project.layers.map(l => ({
-                    ...l,
-                    locked: false,
-                    type: l.type === 'fill' ? 'draw' : l.type
-                }));
-                project.frames.forEach(f => normalizeFrame(f));
-
-                // If frame load failed or empty, init default
-                if (project.frames.length === 0) {
-                    project.frames = [];
-                    ensureFrame(0);
-                }
+                await loadProjectFromMeta(loadMeta);
             } else {
                 await actions.initProject();
             }
@@ -3347,7 +3490,7 @@ const createAppInstance = () => createApp({
                         }
                         break;
                     case 's':
-                        if (e.ctrlKey) {
+                        if (e.ctrlKey || e.metaKey) {
                             e.preventDefault();
                             await actions.saveProject();
                         }
@@ -3489,7 +3632,14 @@ const createAppInstance = () => createApp({
             setActiveBrushSize,
             undo,
             redo,
-            historyState
+            historyState,
+            getSafeFps,
+            showProjectsModal,
+            projectsList,
+            openProjectsModal,
+            loadProjectById,
+            deleteProjectById,
+            formatDate
         };
     }
 });
