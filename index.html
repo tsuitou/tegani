@@ -12,7 +12,7 @@
     <script src="./vendor/pako.min.js"></script>
     <script src="./vendor/UPNG.min.js"></script>
     <script src="./vendor/webm-writer-0.3.0.js"></script>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <link rel="stylesheet" href="./vendor/fontawesome/css/all.min.css">
 
     <style>
         :root {
@@ -33,7 +33,8 @@
             --panel-w: 220px;
         }
 
-        * { box-sizing: border-box; user-select: none; }
+        * { box-sizing: border-box; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+        button, .btn, .menu-item, .tool-btn, .frame-card, .add-frame-btn { -webkit-tap-highlight-color: transparent; }
         body {
             margin: 0;
             padding: 0;
@@ -231,6 +232,7 @@
             align-items: center;
             overflow: hidden;
             position: relative;
+            touch-action: none;
             /* Checkerboard pattern */
             background-image: linear-gradient(45deg, #333 25%, transparent 25%), linear-gradient(-45deg, #333 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #333 75%), linear-gradient(-45deg, transparent 75%, #333 75%);
             background-size: 20px 20px;
@@ -321,6 +323,33 @@
         .btn-secondary { background: #555; color: white; }
 
         .btn-secondary:hover { background: #666; }
+
+        .btn-history {
+            background: #2a2a2a;
+            border: 1px solid #444;
+            color: var(--text-main);
+            width: 32px;
+            height: 32px;
+            border-radius: 4px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: all 0.2s;
+            -webkit-tap-highlight-color: transparent;
+        }
+        .btn-history:hover:not(:disabled) {
+            background: var(--selected);
+            border-color: #555;
+            color: #fff;
+        }
+        .btn-history:disabled {
+            opacity: 0.3;
+            cursor: not-allowed;
+            background: #222;
+            border-color: #333;
+            color: #666;
+        }
 
         /* Custom UI Components */
         .btn-group { display: flex; border: 1px solid #555; border-radius: 4px; overflow: hidden; }
@@ -526,6 +555,7 @@
                     :style="{zIndex: 100, cursor: canvasCursor}"
                     @pointermove="handlers.pointerMove"
                     @pointerup="handlers.pointerUp"
+                    @pointerleave="handlers.pointerLeave"
                 ></canvas>
             </div>
         </div>
@@ -538,8 +568,21 @@
 
     <!-- Right Panels -->
     <div class="panels">
+        <!-- Undo/Redo Buttons -->
+        <div class="panel-section history-controls" style="border-bottom: 1px solid #222; padding: 6px 10px; display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+            <div class="panel-header" style="margin-bottom: 0;">History</div>
+            <div style="display: flex; gap: 6px;">
+                <button class="btn-history" :disabled="!historyState.canUndo" @click="undo" title="Undo (Ctrl+Z)">
+                    <i class="fas fa-undo"></i>
+                </button>
+                <button class="btn-history" :disabled="!historyState.canRedo" @click="redo" title="Redo (Ctrl+Y)">
+                    <i class="fas fa-redo"></i>
+                </button>
+            </div>
+        </div>
+
         <!-- Layer Panel -->
-            <div class="panel-section panel-layers" style="border-bottom: 1px solid #222;">
+        <div class="panel-section panel-layers" style="border-bottom: 1px solid #222;">
             <div class="panel-header">Layers</div>
             <div class="layer-list">
                 <!-- Reverse order for visual stack -->
@@ -915,7 +958,28 @@ const createAppInstance = () => createApp({
             frames: []
         });
 
+        const historyState = reactive({
+            canUndo: false,
+            canRedo: false
+        });
+
+        const updateHistoryState = () => {
+            const frame = currentFrame.value;
+            if (!frame) {
+                historyState.canUndo = false;
+                historyState.canRedo = false;
+                return;
+            }
+            const stacks = history.frames[frame.id];
+            historyState.canUndo = !!(stacks && stacks.undo.length > 0);
+            historyState.canRedo = !!(stacks && stacks.redo.length > 0);
+        };
+
         const session = reactive(createDefaultSession());
+
+        let selectionDashOffset = 0;
+        let lastAnimateTime = 0;
+        let lastCursorPos = null;
 
         const viewport = reactive({
             zoom: 1.0,
@@ -1319,6 +1383,7 @@ const createAppInstance = () => createApp({
             const limit = getUndoLimit();
             if (stacks.undo.length > limit) stacks.undo.shift();
             stacks.redo = []; // Clear redo on new action
+            updateHistoryState();
         };
 
         const resetSelectionState = () => {
@@ -1349,6 +1414,7 @@ const createAppInstance = () => createApp({
 
             const prev = stacks.undo.pop();
             await restoreFrameSnapshot(prev);
+            updateHistoryState();
         };
 
         const redo = async () => {
@@ -1369,6 +1435,7 @@ const createAppInstance = () => createApp({
 
             const next = stacks.redo.pop();
             await restoreFrameSnapshot(next);
+            updateHistoryState();
         };
 
         // 2. Drawing Logic (Interpolation)
@@ -1583,11 +1650,6 @@ const createAppInstance = () => createApp({
             // Draw path outline if selecting
             if (session.isDrawing && (session.tool.startsWith('select'))) {
                 ctx.save();
-                // Outer dark stroke for visibility
-                ctx.setLineDash([]);
-                ctx.strokeStyle = 'rgba(0,0,0,0.6)';
-                ctx.lineWidth = 2 / viewport.zoom;
-
                 const drawPath = () => {
                     if (session.tool === 'select-rect') {
                         const {
@@ -1607,13 +1669,19 @@ const createAppInstance = () => createApp({
                     }
                 };
 
-                drawPath();
-
-                // Inner dashed accent
-                ctx.setLineDash([5, 4]);
-                ctx.strokeStyle = '#4da3ff';
+                // Solid white background line (1px thick on screen)
+                ctx.setLineDash([]);
+                ctx.strokeStyle = '#ffffff';
                 ctx.lineWidth = 1 / viewport.zoom;
                 drawPath();
+
+                // Dashed black overlay line (1px thick on screen)
+                ctx.setLineDash([4 / viewport.zoom, 4 / viewport.zoom]);
+                ctx.strokeStyle = '#000000';
+                ctx.lineWidth = 1 / viewport.zoom;
+                ctx.lineDashOffset = -selectionDashOffset / viewport.zoom;
+                drawPath();
+
                 ctx.restore();
             }
 
@@ -1623,12 +1691,7 @@ const createAppInstance = () => createApp({
                     ctx.putImageData(session.selection.floatingData, session.selection.floatingPos.x, session.selection.floatingPos.y);
                 }
 
-                // Draw Border
                 ctx.save();
-                ctx.setLineDash([]);
-                ctx.strokeStyle = 'rgba(0,0,0,0.6)';
-                ctx.lineWidth = 2 / viewport.zoom;
-
                 const drawBorder = () => {
                     if (session.selection.originPath) {
                         // Draw lasso path
@@ -1647,15 +1710,54 @@ const createAppInstance = () => createApp({
                     }
                 };
 
+                // Solid white background line (1px thick on screen)
+                ctx.setLineDash([]);
+                ctx.strokeStyle = '#ffffff';
+                ctx.lineWidth = 1 / viewport.zoom;
                 drawBorder();
 
-                ctx.setLineDash([5, 5]);
-                ctx.strokeStyle = '#4da3ff';
+                // Dashed black overlay line (1px thick on screen)
+                ctx.setLineDash([4 / viewport.zoom, 4 / viewport.zoom]);
+                ctx.strokeStyle = '#000000';
                 ctx.lineWidth = 1 / viewport.zoom;
-
+                ctx.lineDashOffset = -selectionDashOffset / viewport.zoom;
                 drawBorder();
 
                 ctx.restore();
+            }
+        };
+
+        const animateSelection = (timestamp) => {
+            requestAnimationFrame(animateSelection);
+
+            if (!lastAnimateTime) lastAnimateTime = timestamp;
+            const delta = timestamp - lastAnimateTime;
+            lastAnimateTime = timestamp;
+
+            const isSelecting = session.isDrawing && session.tool.startsWith('select');
+            const hasActiveSelection = session.selection.active && session.selection.floatingData;
+
+            if (isSelecting || hasActiveSelection) {
+                const isMoving = (session.tool === 'move' && session.isDrawing) || session.isPanning;
+                if (!isMoving) {
+                    selectionDashOffset = (selectionDashOffset + delta * 0.015) % 8;
+                }
+
+                const tempCtx = getTempCtx();
+                if (tempCtx) {
+                    clearCanvas(tempCtx);
+                    renderSelectionOverlay();
+
+                    // Restore brush preview cursor if active and pointer is over canvas
+                    if (!session.isDrawing && lastCursorPos && ['pen', 'eraser', 'bucket'].includes(session.tool)) {
+                        tempCtx.beginPath();
+                        tempCtx.strokeStyle = '#aaa';
+                        tempCtx.lineWidth = 1 / viewport.zoom;
+                        const size = session.tool === 'eraser' ? activeBrushSize.value : session.brush.penSize;
+                        tempCtx.arc(lastCursorPos.x, lastCursorPos.y, size / 2, 0, Math.PI * 2);
+                        tempCtx.stroke();
+                    }
+                }
             }
         };
 
@@ -2102,6 +2204,7 @@ const createAppInstance = () => createApp({
                 const pos = getPointerPos(e);
                 const x = pos.x;
                 const y = pos.y;
+                lastCursorPos = { x, y };
 
                 // Cursor Preview (on Temp)
                 const tempCtx = getTempCtx();
@@ -2159,6 +2262,17 @@ const createAppInstance = () => createApp({
                         const size = (session.tool === 'eraser' || session.isRightClick) ? session.brush.eraserSize : session.brush.penSize;
                         tempCtx.arc(x, y, size / 2, 0, Math.PI * 2);
                         tempCtx.stroke();
+                    }
+                }
+            },
+
+            pointerLeave: (e) => {
+                lastCursorPos = null;
+                const tempCtx = getTempCtx();
+                if (tempCtx) {
+                    clearCanvas(tempCtx);
+                    if (session.selection.active) {
+                        renderSelectionOverlay();
                     }
                 }
             },
@@ -2333,7 +2447,8 @@ const createAppInstance = () => createApp({
                 if (session.currentFrameIndex >= project.frames.length) {
                     session.currentFrameIndex = project.frames.length - 1;
                 }
-                renderCurrentFrame();
+                await renderCurrentFrame();
+                updateHistoryState();
                 //triggerAutoSave();
             },
 
@@ -2344,7 +2459,8 @@ const createAppInstance = () => createApp({
                 session.currentFrameIndex = idx;
                 ensureFrame(idx);
                 ensureFrameHistory(project.frames[idx]?.id);
-                renderCurrentFrame();
+                await renderCurrentFrame();
+                updateHistoryState();
             },
 
             prevFrame() {
@@ -3131,6 +3247,7 @@ const createAppInstance = () => createApp({
 
             await nextTick();
             renderCurrentFrame();
+            updateHistoryState();
 
             // Keybindings
             window.addEventListener('keydown', async (e) => {
@@ -3245,6 +3362,81 @@ const createAppInstance = () => createApp({
             window.addEventListener('pointerup', handleGlobalPointerRelease);
             window.addEventListener('pointercancel', handleGlobalPointerRelease);
 
+            // Multi-touch Zoom (Pinch) & Pan (Two-finger scroll) for iPad / Tablet compatibility
+            const activePointers = new Map();
+
+            window.addEventListener('pointerdown', (e) => {
+                if (workspaceRef.value && workspaceRef.value.contains(e.target)) {
+                    activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+                    if (activePointers.size >= 2) {
+                        // Cancel current single-finger drawing safely to prevent stray marks
+                        if (session.isDrawing) {
+                            session.isDrawing = false;
+                            clearCanvas(getTempCtx());
+                            lastPoint = null;
+                            smoothedPoint = null;
+                            lastStrokeTime = null;
+                            pendingStroke = null;
+                        }
+                        session.isPanning = false;
+                        viewport.lastTouchDist = undefined;
+                        viewport.lastTouchCenter = undefined;
+                    }
+                }
+            });
+
+            window.addEventListener('pointermove', (e) => {
+                if (activePointers.has(e.pointerId)) {
+                    activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+                    if (activePointers.size === 2) {
+                        const keys = Array.from(activePointers.keys());
+                        const p1 = activePointers.get(keys[0]);
+                        const p2 = activePointers.get(keys[1]);
+
+                        const dist = Math.hypot(p1.x - p2.x, p1.y - p2.y);
+                        const centerX = (p1.x + p2.x) / 2;
+                        const centerY = (p1.y + p2.y) / 2;
+
+                        if (viewport.lastTouchDist !== undefined && viewport.lastTouchCenter !== undefined) {
+                            const prevDist = viewport.lastTouchDist;
+                            const prevCenter = viewport.lastTouchCenter;
+
+                            let zoomFactor = 1.0;
+                            if (prevDist > 0 && dist > 0) {
+                                zoomFactor = dist / prevDist;
+                            }
+                            const newZoom = Math.max(0.1, Math.min(10.0, viewport.zoom * zoomFactor));
+
+                            const dx = centerX - prevCenter.x;
+                            const dy = centerY - prevCenter.y;
+
+                            const worldCenterX = (centerX - viewport.pan.x) / viewport.zoom;
+                            const worldCenterY = (centerY - viewport.pan.y) / viewport.zoom;
+
+                            viewport.pan.x = centerX + dx - worldCenterX * newZoom;
+                            viewport.pan.y = centerY + dy - worldCenterY * newZoom;
+                            viewport.zoom = newZoom;
+                        }
+
+                        viewport.lastTouchDist = dist;
+                        viewport.lastTouchCenter = { x: centerX, y: centerY };
+                    }
+                }
+            });
+
+            const handlePointerUpOrCancel = (e) => {
+                if (activePointers.has(e.pointerId)) {
+                    activePointers.delete(e.pointerId);
+                    viewport.lastTouchDist = undefined;
+                    viewport.lastTouchCenter = undefined;
+                }
+            };
+
+            window.addEventListener('pointerup', handlePointerUpOrCancel);
+            window.addEventListener('pointercancel', handlePointerUpOrCancel);
+
             // Watchers
             watch(() => settings.onionSkin, () => {
                 renderOnionSkin();
@@ -3254,6 +3446,9 @@ const createAppInstance = () => createApp({
             watch(() => project.layers.map(l => ({ id: l.id, visible: l.visible })), () => {
                 renderOnionSkin();
             });
+
+            // Start selection animation
+            requestAnimationFrame(animateSelection);
         });
 
         return {
@@ -3291,7 +3486,10 @@ const createAppInstance = () => createApp({
             brushPresets,
             workspaceRef,
             canvasViewportRef,
-            setActiveBrushSize
+            setActiveBrushSize,
+            undo,
+            redo,
+            historyState
         };
     }
 });
