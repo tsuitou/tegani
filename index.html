@@ -31,6 +31,9 @@
             --timeline-h: 120px;
             --sidebar-w: 60px;
             --panel-w: 220px;
+            /* Chrome (toolbar/panels/header/timeline) UI scale, set by JS auto-fit. Canvas and
+               modal overlays are NOT scaled, so drawing accuracy & fixed overlays are unaffected. */
+            --ui-scale: 1;
         }
 
         * { box-sizing: border-box; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
@@ -51,8 +54,9 @@
             display: grid;
             width: 100%;
             height: 100%;
-            grid-template-columns: var(--sidebar-w) 1fr var(--panel-w);
-            grid-template-rows: var(--header-h) var(--timeline-h) 1fr;
+            /* Chrome tracks shrink with --ui-scale; canvas (1fr) takes the rest. */
+            grid-template-columns: calc(var(--sidebar-w) * var(--ui-scale)) 1fr calc(var(--panel-w) * var(--ui-scale));
+            grid-template-rows: calc(var(--header-h) * var(--ui-scale)) calc(var(--timeline-h) * var(--ui-scale)) 1fr;
             grid-template-areas:
                 "header   header   header"
                 "timeline timeline timeline"
@@ -68,6 +72,12 @@
             align-items: center;
             padding: 0 10px;
             font-size: 0.9rem;
+            /* Full-width bar scaled via transform (universally supported, unlike `zoom`).
+               Width is pre-compensated so it renders full-width; the scaled track sets the height. */
+            height: var(--header-h);
+            width: calc(100% / var(--ui-scale));
+            transform: scale(var(--ui-scale));
+            transform-origin: top left;
         }
         .header-title { font-weight: bold; margin-right: 20px; color: var(--accent); }
         .menu-item {
@@ -85,6 +95,11 @@
             border-bottom: 1px solid #111;
             display: flex;
             overflow: hidden;
+            /* Full-width bar scaled via transform; width pre-compensated, height from scaled track. */
+            height: var(--timeline-h);
+            width: calc(100% / var(--ui-scale));
+            transform: scale(var(--ui-scale));
+            transform-origin: top left;
         }
         .timeline-controls {
             width: 230px;
@@ -151,8 +166,13 @@
             display: flex;
             flex-direction: column;
             align-items: center;
-            padding-top: 10px;
-            gap: 15px;
+            padding-top: clamp(4px, calc(10px * var(--ui-scale)), 10px);
+            gap: clamp(6px, calc(15px * var(--ui-scale)), 15px);
+            /* Side column scaled via transform; width from scaled track, height pre-compensated. */
+            width: var(--sidebar-w);
+            height: calc(100% / var(--ui-scale));
+            transform: scale(var(--ui-scale));
+            transform-origin: top left;
         }
         .tool-group { display: flex; flex-direction: column; gap: 5px; width: 100%; align-items: center; }
         .tool-btn {
@@ -171,8 +191,29 @@
             font-size: 8px; opacity: 0.7;
         }
         
-        .brush-panel { display: flex; flex-direction: column; align-items: center; gap: 8px; padding-top: 4px; overflow: visible; }
-        .brush-slider-wrapper { height: 160px; display: flex; align-items: center; justify-content: center; }
+        .toolbar-separator {
+            width: 80%;
+            border-color: #444;
+            margin: 0;
+        }
+        .brush-tool-group {
+            margin-top: 0;
+            margin-bottom: clamp(6px, calc(20px * var(--ui-scale)), 20px);
+        }
+        .brush-panel {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: clamp(3px, calc(8px * var(--ui-scale)), 8px);
+            padding-top: 4px;
+            overflow: visible;
+        }
+        .brush-slider-wrapper {
+            height: clamp(92px, calc(160px * var(--ui-scale)), 160px);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
         .range-input {
             appearance: none;
             -moz-appearance: none;
@@ -202,11 +243,11 @@
             border: none;
         }
         .brush-slider {
-            width: 180px;
+            width: clamp(104px, calc(180px * var(--ui-scale)), 180px);
             height: 18px;
             transform: rotate(-90deg);
             transform-origin: center;
-            margin: -20px 0 0 0;
+            margin: clamp(-20px, calc(-20px * var(--ui-scale)), -10px) 0 0 0;
             background: transparent;
         }
         .brush-size-preview {
@@ -216,11 +257,11 @@
         }
         .brush-size-preview-wrap {
             width: 60px;
-            height: 60px;
+            height: clamp(32px, calc(60px * var(--ui-scale)), 60px);
             display: flex;
             align-items: center;
             justify-content: center;
-            margin-top: -6px;
+            margin-top: clamp(-6px, calc(-6px * var(--ui-scale)), -2px);
         }
 
         /* Canvas Area */
@@ -261,13 +302,18 @@
             border-left: 1px solid #111;
             display: flex;
             flex-direction: column;
-            height: 100%;
+            /* Side column scaled via transform; width from scaled track, height pre-compensated.
+               origin top-left keeps it glued to the column's left edge so it stays on-screen. */
+            width: var(--panel-w);
+            height: calc(100% / var(--ui-scale));
+            transform: scale(var(--ui-scale));
+            transform-origin: top left;
         }
         .panel-section { padding: 6px 8px; display: flex; flex-direction: column; }
-        .panel-layers { flex: 1; }
+        .panel-layers { flex: 0 1 auto; min-height: 0; }
         .panel-header { font-size: 0.8rem; font-weight: bold; margin-bottom: 6px; color: #888; text-transform: uppercase; }
         
-        .layer-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+        .layer-list { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
         .layer-item {
             display: flex; align-items: center; padding: 6px;
             background: #444; border-radius: 4px; cursor: pointer; border-left: 3px solid transparent;
@@ -282,7 +328,8 @@
             border-top: 1px solid #111; 
             background: #2a2a2a; 
             padding: 8px 8px 10px 8px;
-            margin-top: auto;
+            margin-top: 0;
+            flex: 0 0 auto;
         }
         .color-selector { display: flex; gap: 10px; margin-bottom: 10px; }
         .color-box {
@@ -313,9 +360,23 @@
 				.row { display: flex; justify-content: space-around; }
 				.column { width: 45% }
         .modal h3 { margin-top: 0; color: var(--accent); border-bottom: 1px solid #444; padding-bottom: 10px; margin-bottom: 20px; }
-        .form-group { margin-bottom: 20px; }
-        .form-group label { display: block; margin-bottom: 8px; font-size: 0.9rem; color: #aaa; }
-        .form-group input[type="number"] { width: 100%; padding: 8px; background: #222; border: 1px solid #555; color: #fff; border-radius: 4px; }
+	        .form-group { margin-bottom: 20px; }
+	        .form-group label { display: block; margin-bottom: 8px; font-size: 0.9rem; color: #aaa; }
+	        .form-group input[type="number"],
+	        .form-group input[type="text"],
+	        .project-title-input {
+	            width: 100%;
+	            padding: 8px;
+	            background: #222;
+	            border: 1px solid #555;
+	            color: #fff;
+	            border-radius: 4px;
+	        }
+	        .project-title-input {
+	            flex: 1;
+	            font-weight: bold;
+	            min-width: 0;
+	        }
         
         .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 30px; border-top: 1px solid #444; padding-top: 20px; }
         .btn { padding: 8px 20px; border: none; border-radius: 4px; cursor: pointer; font-size: 0.9rem; transition: background 0.2s; }
@@ -323,6 +384,35 @@
         .btn-secondary { background: #555; color: white; }
 
         .btn-secondary:hover { background: #666; }
+
+        .toast-container {
+            position: fixed;
+            right: 12px;
+            bottom: 12px;
+            z-index: 3000;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            pointer-events: none;
+        }
+        .toast {
+            width: max-content;
+            min-width: 220px;
+            max-width: min(360px, calc(100vw - 24px));
+            padding: 10px 12px;
+            border-radius: 4px;
+            background: #222;
+            color: var(--text-main);
+            border: 1px solid #555;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.35);
+            font-size: 0.85rem;
+            line-height: 1.35;
+            overflow-wrap: anywhere;
+            pointer-events: auto;
+        }
+        .toast-success { border-color: var(--accent); }
+        .toast-error { border-color: var(--danger); }
+        .toast-info { border-color: var(--accent); }
 
         .btn-history {
             background: #2a2a2a;
@@ -488,7 +578,7 @@
                 <i class="fas fa-arrows-alt"></i><span class="tool-shortcut">V</span>
             </div>
         </div>
-        <hr style="width: 80%; border-color: #444;">
+        <hr class="toolbar-separator">
         <div class="tool-group">
             <div class="tool-btn" :class="{active: session.tool === 'pen'}" @click="setTool('pen')" title="Pen (B)">
                 <i class="fas fa-pen"></i><span class="tool-shortcut">B</span>
@@ -505,7 +595,7 @@
         </div>
         
         <!-- Brush Size -->
-        <div class="tool-group" style="margin-top: auto; margin-bottom: 20px;">
+        <div class="tool-group brush-tool-group">
             <div class="brush-panel">
                 <div class="brush-slider-wrapper">
                     <input class="range-input brush-slider" type="range" min="1" max="48"
@@ -746,12 +836,16 @@
             </div>
         </div>
 		</div>
-    <div v-if="showNewProjectModal" class="modal-overlay" @click.self="showNewProjectModal=false">
-        <div class="modal">
-            <h3>New Project</h3>
-            <div class="form-group">
-                <label>Width</label>
-                <input type="number" v-model.number="newProjectForm.width" min="64" max="4096">
+	    <div v-if="showNewProjectModal" class="modal-overlay" @click.self="showNewProjectModal=false">
+	        <div class="modal">
+	            <h3>New Project</h3>
+	            <div class="form-group">
+	                <label>Title</label>
+	                <input type="text" v-model.trim="newProjectForm.title" maxlength="80">
+	            </div>
+	            <div class="form-group">
+	                <label>Width</label>
+	                <input type="number" v-model.number="newProjectForm.width" min="64" max="4096">
             </div>
             <div class="form-group">
                 <label>Height</label>
@@ -802,11 +896,13 @@
                     class="project-row"
                     style="display:flex; align-items:center; gap:10px; background:#2a2a2a; border:1px solid #444; border-radius:6px; padding:10px;"
                     :style="{ borderColor: p.isCurrent ? 'var(--accent)' : '#444' }">
-                    <div style="flex:1; min-width:0;">
-                        <div style="font-weight:bold; display:flex; align-items:center; gap:8px;">
-                            {{ p.title }}
-                            <span v-if="p.isCurrent" style="font-size:0.7rem; color:var(--accent); border:1px solid var(--accent); border-radius:3px; padding:1px 5px;">Current</span>
-                        </div>
+	                    <div style="flex:1; min-width:0;">
+	                        <div style="display:flex; align-items:center; gap:8px;">
+	                            <input class="project-title-input" type="text" v-model.trim="p.title" maxlength="80"
+	                                @blur="renameProject(p)"
+	                                @keydown.enter.prevent="$event.target.blur()">
+	                            <span v-if="p.isCurrent" style="font-size:0.7rem; color:var(--accent); border:1px solid var(--accent); border-radius:3px; padding:1px 5px;">Current</span>
+	                        </div>
                         <div style="font-size:0.75rem; color:#888; margin-top:3px;">
                             {{ p.width }}×{{ p.height }} · {{ p.frameCount }} frames · {{ formatDate(p.modifiedAt) }}
                         </div>
@@ -822,9 +918,15 @@
             <div class="modal-actions">
                 <button class="btn btn-secondary" @click="showProjectsModal=false">Close</button>
             </div>
+	        </div>
+	    </div>
+
+    <div class="toast-container">
+        <div v-for="toast in toasts" :key="toast.id" class="toast" :class="'toast-' + toast.type">
+            {{ toast.message }}
         </div>
     </div>
-
+	
 </div>
 
 <script>
@@ -980,23 +1082,31 @@ const createAppInstance = () => createApp({
     setup() {
         // --- State Definitions ---
         const isLoading = ref(false);
-        const showSettings = ref(false);
-        const showNewProjectModal = ref(false);
-        const showExportModal = ref(false);
-        const canvasRefs = ref({}); // { id: DOMElement }
+	        const showSettings = ref(false);
+	        const showNewProjectModal = ref(false);
+	        const showExportModal = ref(false);
+	        const toasts = ref([]);
+	        const canvasRefs = ref({}); // { id: DOMElement }
         const canvasTemp = ref(null);
         const canvasBg = ref(null);
         const canvasOnion = ref(null);
         const frameStripRef = ref(null);
         const fileInput = ref(null);
         const canvasViewportRef = ref(null);
-        const frameContext = reactive({
-            visible: false,
-            x: 0,
-            y: 0,
-            index: null
-        });
-        const workspaceRef = ref(null);
+	        const frameContext = reactive({
+	            visible: false,
+	            x: 0,
+	            y: 0,
+	            index: null
+	        });
+	        const showToast = (message, type = 'info', timeout = 3000) => {
+	            const id = Date.now() + Math.random();
+	            toasts.value.push({ id, message, type });
+	            window.setTimeout(() => {
+	                toasts.value = toasts.value.filter(t => t.id !== id);
+	            }, timeout);
+	        };
+	        const workspaceRef = ref(null);
         let onionBuffer = null; // Offscreen buffer for onion skin rendering
         // Onion-skin masking is expensive (full-frame luminance loop), but a frame's masked
         // shape only changes when its pixels or the mask settings change. Cache the masked
@@ -1077,10 +1187,11 @@ const createAppInstance = () => createApp({
 
         const settings = reactive(cloneDefaultSettings());
 
-        const newProjectForm = reactive({
-            width: 800,
-            height: 600,
-            fps: 8,
+	        const newProjectForm = reactive({
+	            title: "Untitled",
+	            width: 800,
+	            height: 600,
+	            fps: 8,
             backgroundColor: "#FFFFFF"
         });
         const exportForm = reactive({
@@ -2696,11 +2807,12 @@ const createAppInstance = () => createApp({
         const actions = {
             async initProject(metaOverrides = null) {
                 clearOnionCache();
-                dirtyFrames.clear();
-                project.frames = [];
-                project.id = generateUUID();
-                project.meta.createdAt = Date.now();
-                project.meta.modifiedAt = Date.now();
+	                dirtyFrames.clear();
+	                project.frames = [];
+	                project.id = generateUUID();
+	                project.meta.title = (metaOverrides?.title || 'Untitled').trim() || 'Untitled';
+	                project.meta.createdAt = Date.now();
+	                project.meta.modifiedAt = Date.now();
                 project.layers = cloneDefaultLayers();
                 if (metaOverrides) {
                     project.meta.width = metaOverrides.width;
@@ -2843,9 +2955,9 @@ const createAppInstance = () => createApp({
                     for (const id of prevIds) if (!liveIds.has(id)) frameStore.delete(id);
                     await tx.done;
                     dirtyFrames.clear();
-                    if (!silent) alert('Saved!');
-                } catch (e) {
-                    if (!silent) alert('Save failed: ' + e.message);
+	                    if (!silent) showToast('Saved!', 'success');
+	                } catch (e) {
+	                    if (!silent) showToast('Save failed: ' + e.message, 'error', 5000);
                 }
             },
 
@@ -2961,9 +3073,9 @@ const createAppInstance = () => createApp({
                         await nextTick();
                         renderCurrentFrame();
                         updateHistoryState();
-                        alert("Project loaded!");
-                    } catch (err) {
-                        alert("Failed to load project: " + err.message);
+	                        showToast('Project loaded!', 'success');
+	                    } catch (err) {
+	                        showToast('Failed to load project: ' + err.message, 'error', 5000);
                     }
                 };
                 reader.readAsText(file);
@@ -3214,20 +3326,23 @@ const createAppInstance = () => createApp({
                     if (!Number.isFinite(n)) n = def;
                     return Math.max(lo, Math.min(hi, n));
                 };
-                const width = clampInt(newProjectForm.width, 64, 4096, 800);
-                const height = clampInt(newProjectForm.height, 64, 4096, 600);
-                const fps = clampInt(newProjectForm.fps, 1, 60, 8);
-                // Reflect the clamped values back into the form for consistency
-                newProjectForm.width = width;
-                newProjectForm.height = height;
-                newProjectForm.fps = fps;
+	                const width = clampInt(newProjectForm.width, 64, 4096, 800);
+	                const height = clampInt(newProjectForm.height, 64, 4096, 600);
+	                const fps = clampInt(newProjectForm.fps, 1, 60, 8);
+	                const title = (newProjectForm.title || '').trim() || 'Untitled';
+	                // Reflect the clamped values back into the form for consistency
+	                newProjectForm.title = title;
+	                newProjectForm.width = width;
+	                newProjectForm.height = height;
+	                newProjectForm.fps = fps;
                 showNewProjectModal.value = false;
                 await actions.initProject({
-                    width,
-                    height,
-                    fps,
-                    backgroundColor: newProjectForm.backgroundColor || settings.backgroundColor
-                });
+	                    width,
+	                    height,
+	                    fps,
+	                    title,
+	                    backgroundColor: newProjectForm.backgroundColor || settings.backgroundColor
+	                });
                 await actions.saveProject({ silent: true });
             },
 
@@ -3244,7 +3359,7 @@ const createAppInstance = () => createApp({
                     await idb.deleteDB(DB_NAME);
                     window.location.reload();
                 } catch (e) {
-                    alert("Failed to delete database: " + e.message);
+	                    showToast('Failed to delete database: ' + e.message, 'error', 5000);
                 }
             }
         };
@@ -3398,7 +3513,7 @@ const createAppInstance = () => createApp({
                 URL.revokeObjectURL(url);
             } catch (err) {
                 console.error(err);
-                alert('APNG export failed: ' + err.message);
+	                showToast('APNG export failed: ' + err.message, 'error', 5000);
             } finally {
                 isLoading.value = false;
             }
@@ -3441,7 +3556,7 @@ const createAppInstance = () => createApp({
                 URL.revokeObjectURL(url);
             } catch (err) {
                 console.error(err);
-                alert('ZIP export failed: ' + err.message);
+	                showToast('ZIP export failed: ' + err.message, 'error', 5000);
             } finally {
                 isLoading.value = false;
             }
@@ -3488,7 +3603,7 @@ const createAppInstance = () => createApp({
                 URL.revokeObjectURL(url);
             } catch (err) {
                 console.error(err);
-                alert('WebM export failed: ' + err.message);
+	                showToast('WebM export failed: ' + err.message, 'error', 5000);
             } finally {
                 isLoading.value = false;
             }
@@ -3543,10 +3658,11 @@ const createAppInstance = () => createApp({
             session.colors.secondary = temp;
         };
 
-        const openNewProjectModal = () => {
-            newProjectForm.width = project.meta.width;
-            newProjectForm.height = project.meta.height;
-            newProjectForm.fps = project.meta.fps;
+	        const openNewProjectModal = () => {
+	            newProjectForm.title = 'Untitled';
+	            newProjectForm.width = project.meta.width;
+	            newProjectForm.height = project.meta.height;
+	            newProjectForm.fps = project.meta.fps;
             showNewProjectModal.value = true;
         };
 
@@ -3612,13 +3728,15 @@ const createAppInstance = () => createApp({
                 return '-';
             }
         };
-        const refreshProjectsList = async () => {
-            const db = await dbPromise;
-            const all = await db.getAll('projects');
-            projectsList.value = all.map(m => ({
-                id: m.id,
-                title: (m.meta && m.meta.title) || 'Untitled',
-                width: m.meta?.width,
+	        const normalizeProjectTitle = (title) => (title || '').trim() || 'Untitled';
+	        const refreshProjectsList = async () => {
+	            const db = await dbPromise;
+	            const all = await db.getAll('projects');
+	            projectsList.value = all.map(m => ({
+	                id: m.id,
+	                title: normalizeProjectTitle(m.meta && m.meta.title),
+	                savedTitle: normalizeProjectTitle(m.meta && m.meta.title),
+	                width: m.meta?.width,
                 height: m.meta?.height,
                 fps: m.meta?.fps,
                 frameCount: Array.isArray(m.frames) ? m.frames.length : 0,
@@ -3630,19 +3748,42 @@ const createAppInstance = () => createApp({
             await refreshProjectsList();
             showProjectsModal.value = true;
         };
-        const loadProjectById = async (id) => {
-            if (id === project.id) {
-                showProjectsModal.value = false;
-                return;
-            }
+	        const loadProjectById = async (id) => {
+	            if (id === project.id) {
+	                showProjectsModal.value = false;
+	                return;
+	            }
             const db = await dbPromise;
             const meta = await db.get('projects', id);
             if (!meta) return;
             await commitFloatingSelection();
-            await loadProjectFromMeta(meta);
-            showProjectsModal.value = false;
-        };
-        const deleteProjectById = async (id) => {
+	            await loadProjectFromMeta(meta);
+	            showProjectsModal.value = false;
+	        };
+	        const renameProject = async (item) => {
+	            const title = normalizeProjectTitle(item.title);
+	            item.title = title;
+	            if (title === item.savedTitle) return;
+
+	            const db = await dbPromise;
+	            const meta = await db.get('projects', item.id);
+	            if (!meta) return;
+	            meta.meta = {
+	                ...(meta.meta || {}),
+	                title,
+	                modifiedAt: Date.now()
+	            };
+	            meta.modifiedAt = Date.now();
+	            await db.put('projects', meta);
+	            item.savedTitle = title;
+	            item.modifiedAt = meta.modifiedAt;
+	            if (item.id === project.id) {
+	                project.meta.title = title;
+	                project.meta.modifiedAt = meta.modifiedAt;
+	            }
+	            showToast('Project renamed.', 'success');
+	        };
+	        const deleteProjectById = async (id) => {
             if (!confirm('Delete this project? This cannot be undone.')) return;
             const db = await dbPromise;
             const target = await db.get('projects', id);
@@ -3674,6 +3815,17 @@ const createAppInstance = () => createApp({
 
         // --- Lifecycle & Shortcuts ---
         onMounted(async () => {
+            // Auto-fit the chrome (toolbar/panels/header/timeline) to the viewport so the app
+            // stays usable on smaller screens. Below the reference size we shrink proportionally
+            // down to a floor; never enlarge past 1. Canvas + overlays stay at native scale.
+            const UI_REF_W = 980, UI_REF_H = 760, UI_MIN_SCALE = 0.5;
+            const applyUiScale = () => {
+                const s = Math.max(UI_MIN_SCALE, Math.min(1, window.innerWidth / UI_REF_W, window.innerHeight / UI_REF_H));
+                document.documentElement.style.setProperty('--ui-scale', s.toFixed(3));
+            };
+            applyUiScale();
+            window.addEventListener('resize', applyUiScale);
+
             // Load latest project or init
             const db = await dbPromise;
             const savedProjects = await db.getAll('projects');
@@ -3938,9 +4090,10 @@ const createAppInstance = () => createApp({
             exportZIP,
             exportWebM,
             showSettings,
-            showExportModal,
-            showNewProjectModal,
-            isLoading,
+	            showExportModal,
+	            showNewProjectModal,
+	            toasts,
+	            isLoading,
             getThumb,
             openNewProjectModal,
             newProjectForm,
@@ -3955,9 +4108,10 @@ const createAppInstance = () => createApp({
             getSafeFps,
             showProjectsModal,
             projectsList,
-            openProjectsModal,
-            loadProjectById,
-            deleteProjectById,
+	            openProjectsModal,
+	            loadProjectById,
+	            renameProject,
+	            deleteProjectById,
             formatDate
         };
     }
