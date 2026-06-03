@@ -350,12 +350,6 @@
             border-color: #333;
             color: #666;
         }
-        /* Highlight the history group whose scope Ctrl+Z/Y currently targets */
-        .scope-active .btn-history:not(:disabled) {
-            border-color: var(--accent, #4a9eff);
-            box-shadow: 0 0 0 1px var(--accent, #4a9eff) inset;
-        }
-
         /* Custom UI Components */
         .btn-group { display: flex; border: 1px solid #555; border-radius: 4px; overflow: hidden; }
         .btn-group-item {
@@ -798,10 +792,10 @@
         <div class="modal" style="width: 600px;">
             <h3><i class="fas fa-folder-open"></i> Projects</h3>
             <div style="font-size: 0.8rem; color:#888; margin-bottom: 12px;">
-                ブラウザ内 (IndexedDB) に保存されたプロジェクト一覧です。読み込み・削除ができます。
+                Projects saved in your browser (IndexedDB). You can open or delete them.
             </div>
             <div v-if="projectsList.length === 0" style="color:#888; text-align:center; padding: 20px 0;">
-                保存されたプロジェクトはありません。
+                No saved projects.
             </div>
             <div v-else class="projects-list" style="max-height: 50vh; overflow-y: auto; display:flex; flex-direction:column; gap:6px;">
                 <div v-for="p in projectsList" :key="p.id"
@@ -811,7 +805,7 @@
                     <div style="flex:1; min-width:0;">
                         <div style="font-weight:bold; display:flex; align-items:center; gap:8px;">
                             {{ p.title }}
-                            <span v-if="p.isCurrent" style="font-size:0.7rem; color:var(--accent); border:1px solid var(--accent); border-radius:3px; padding:1px 5px;">現在</span>
+                            <span v-if="p.isCurrent" style="font-size:0.7rem; color:var(--accent); border:1px solid var(--accent); border-radius:3px; padding:1px 5px;">Current</span>
                         </div>
                         <div style="font-size:0.75rem; color:#888; margin-top:3px;">
                             {{ p.width }}×{{ p.height }} · {{ p.frameCount }} frames · {{ formatDate(p.modifiedAt) }}
@@ -904,8 +898,7 @@ const DEFAULT_SETTINGS = {
         luminanceThreshold: 0.9,
         prevTint: "#3498db",
         nextTint: "#e74c3c",
-        target: "all",
-        layers: {}
+        target: "all"
     },
     pressureSensitivity: false,
     penSmoothing: 0.33,
@@ -1005,6 +998,13 @@ const createAppInstance = () => createApp({
         });
         const workspaceRef = ref(null);
         let onionBuffer = null; // Offscreen buffer for onion skin rendering
+        // Onion-skin masking is expensive (full-frame luminance loop), but a frame's masked
+        // shape only changes when its pixels or the mask settings change. Cache the masked
+        // (pre-tint) surface per frame so navigation between unedited frames costs only a blit.
+        const onionMaskCache = new Map(); // frameId -> { sig, w, h, canvas }
+        let onionTintBuffer = null;       // reused scratch for per-call tint composition
+        const invalidateOnion = (frameId) => { if (frameId) onionMaskCache.delete(frameId); };
+        const clearOnionCache = () => onionMaskCache.clear();
 
         // Core State
         const project = reactive({
@@ -1088,15 +1088,6 @@ const createAppInstance = () => createApp({
         });
 
         const brushPresets = [];
-        const syncOnionLayerSelection = () => {
-            project.layers.forEach(l => {
-                if (settings.onionSkin.layers[l.id] === undefined) {
-                    // Default: Enable onion skin for all layers (including background),
-                    // relying on luminance threshold to hide white backgrounds.
-                    settings.onionSkin.layers[l.id] = true;
-                }
-            });
-        };
         const setActiveBrushSize = (v) => {
             const val = Math.max(1, Math.min(48, v));
             if (session.tool === 'eraser') session.brush.eraserSize = val;
@@ -1147,36 +1138,75 @@ const createAppInstance = () => createApp({
             updateHistoryState();
         };
 
-        // A pixel edit captures the "before" image of the affected layers on the visible
-        // working canvases at begin, and computes the changed bbox at commit. Only the
-        // changed rectangle ("before") is stored; the "after" is recovered on undo, so a
-        // deep undo stack of small strokes stays cheap in memory.
+        // Round a (possibly fractional) bbox and clamp it to the canvas; null if empty.
+        const clampBBox = (b, w, h) => {
+            const x0 = Math.max(0, Math.floor(b.x));
+            const y0 = Math.max(0, Math.floor(b.y));
+            const x1 = Math.min(w, Math.ceil(b.x + b.w));
+            const y1 = Math.min(h, Math.ceil(b.y + b.h));
+            if (x1 <= x0 || y1 <= y0) return null;
+            return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+        };
+        // Union a freshly-drawn rectangle into the active stroke's dirty region for a layer.
+        const expandDirty = (layerId, box) => {
+            if (!pendingEdit || !(layerId in pendingEdit.dirty)) return;
+            const cur = pendingEdit.dirty[layerId];
+            if (!cur) { pendingEdit.dirty[layerId] = { ...box }; return; }
+            const x0 = Math.min(cur.x, box.x), y0 = Math.min(cur.y, box.y);
+            const x1 = Math.max(cur.x + cur.w, box.x + box.w), y1 = Math.max(cur.y + cur.h, box.y + box.h);
+            cur.x = x0; cur.y = y0; cur.w = x1 - x0; cur.h = y1 - y0;
+        };
+
+        // A pixel edit snapshots the affected layers' working canvases at begin (a cheap
+        // drawImage blit, not a getImageData readback). Stroke tools accumulate a dirty
+        // rectangle as they draw, so commit reads back only that rectangle. Only the changed
+        // rectangle ("before") is stored; the "after" is recovered on undo, so a deep undo
+        // stack of small strokes stays cheap in memory. Non-stroke edits (fill/paste/transform)
+        // leave the dirty rect null and fall back to a full-frame diff at commit.
         const beginPixelEdit = (layerIds) => {
             const frame = currentFrame.value;
             if (!frame) { pendingEdit = null; return; }
             const w = project.meta.width, h = project.meta.height;
             const before = {};
+            const dirty = {};
             for (const id of layerIds) {
                 const ctx = getCtx(id);
-                if (ctx) before[id] = ctx.getImageData(0, 0, w, h);
+                if (!ctx) continue;
+                const snap = makeSurface(w, h);
+                snap.getContext('2d', { willReadFrequently: true }).drawImage(ctx.canvas, 0, 0);
+                before[id] = snap;
+                dirty[id] = null;
             }
-            pendingEdit = { frameId: frame.id, before };
+            pendingEdit = { frameId: frame.id, before, dirty };
         };
         const commitPixelEdit = () => {
             if (!pendingEdit) return;
             const w = project.meta.width, h = project.meta.height;
             const patches = [];
             for (const id in pendingEdit.before) {
-                const ctx = getCtx(Number(id));
+                const lid = Number(id);
+                const ctx = getCtx(lid);
                 if (!ctx) continue;
-                const before = pendingEdit.before[id];
-                const after = ctx.getImageData(0, 0, w, h);
-                const bbox = diffBBox(before.data, after.data, w, h);
-                if (bbox) patches.push({ layerId: Number(id), bbox, data: cropImageData(before, bbox) });
+                const snap = pendingEdit.before[id];
+                const snapCtx = snap.getContext('2d', { willReadFrequently: true });
+                const tracked = pendingEdit.dirty[id];
+                if (tracked) {
+                    // Fast path: stroke tools tracked exactly where they drew.
+                    const bbox = clampBBox(tracked, w, h);
+                    if (!bbox) continue;
+                    patches.push({ layerId: lid, bbox, data: snapCtx.getImageData(bbox.x, bbox.y, bbox.w, bbox.h) });
+                } else {
+                    // Fallback: non-stroke edit — diff the whole layer to find the changed rect.
+                    const before = snapCtx.getImageData(0, 0, w, h);
+                    const after = ctx.getImageData(0, 0, w, h);
+                    const bbox = diffBBox(before.data, after.data, w, h);
+                    if (bbox) patches.push({ layerId: lid, bbox, data: cropImageData(before, bbox) });
+                }
             }
             const frameId = pendingEdit.frameId;
             pendingEdit = null;
             if (patches.length) {
+                invalidateOnion(frameId); // edited frame's onion shape is now stale
                 const ch = canvasHistory(frameId);
                 ch.undo.push({ type: 'pixel', frameId, patches });
                 ch.redo = [];
@@ -1197,6 +1227,12 @@ const createAppInstance = () => createApp({
         // --- Computed ---
         const drawingLayers = computed(() => project.layers.filter(l => l.type === 'draw'));
         const currentFrame = computed(() => project.frames[session.currentFrameIndex]);
+        // Pixel edits are only allowed on a layer that is both visible and unlocked. A hidden
+        // layer is therefore non-editable (you cannot paint on something you cannot see).
+        const isCurrentLayerEditable = () => {
+            const l = project.layers.find(x => x.id === session.currentLayerId);
+            return !!l && l.visible && !l.locked;
+        };
         const defaultPalette = DEFAULT_PALETTE;
         const canvasCursor = computed(() => (['pen', 'eraser'].includes(session.tool) ? 'none' : 'crosshair'));
         const activeBrushSize = computed(() => session.tool === 'eraser' ? session.brush.eraserSize : session.brush.penSize);
@@ -1204,7 +1240,7 @@ const createAppInstance = () => createApp({
             get: () => {
                 const clamped = Math.min(SMOOTHING_MAX, Math.max(SMOOTHING_MIN, settings.penSmoothing || SMOOTHING_MIN));
                 const ratio = (SMOOTHING_MAX - clamped) / (SMOOTHING_MAX - SMOOTHING_MIN);
-                return Math.round(ratio * 9) + 1; // 1(弱)→10(強)
+                return Math.round(ratio * 9) + 1; // 1(weak) -> 10(strong)
             },
             set: (val) => {
                 const clampedStrength = Math.min(10, Math.max(1, val));
@@ -1220,17 +1256,109 @@ const createAppInstance = () => createApp({
         // Pixel data lives OUTSIDE Vue reactivity. frame.id -> { [layerId]: HTMLCanvasElement }.
         // The visible <canvas> elements are the working surface for the CURRENT frame; these
         // cells are the authoritative store for every frame, kept in sync via cheap drawImage.
-        const cellStore = new Map();
+        const cellStore = new Map();      // LIVE (decoded) tier: frameId -> { layerId: canvas }
         const makeSurface = (w, h) => {
             const c = document.createElement('canvas');
             c.width = w;
             c.height = h;
             return c;
         };
+
+        // --- Memory tiering (LRU eviction) ---
+        // Only a bounded window of frames is kept decoded (live canvases). Frames outside the
+        // window are evicted to compressed PNG bytes (dormant) and decoded back on demand.
+        // This caps memory at ~DECODE_BUDGET frames instead of growing with frame count.
+        const DECODE_BUDGET = 24;             // max live (decoded) frames
+        const PLAYBACK_LOOKAHEAD = 4;         // frames kept ready ahead of the playhead
+        const dormantStore = new Map();       // frameId -> { layerId: Uint8Array (PNG) }
+        const cellLru = new Map();            // frameId -> last-used tick
+        let lruClock = 0;
+        const dirtyFrames = new Set();        // frames whose pixels changed since the last save
+        const touchFrame = (frameId) => { cellLru.set(frameId, ++lruClock); };
+
+        const encodeFrameCells = (cells) => {
+            const out = {};
+            for (const k in cells) {
+                const c = cells[k];
+                const buf = c.getContext('2d', { willReadFrequently: true })
+                    .getImageData(0, 0, c.width, c.height).data.buffer;
+                out[k] = new Uint8Array(UPNG.encode([buf], c.width, c.height, 0)); // lossless
+            }
+            return out;
+        };
+        const decodeFrameCells = (bytesSet) => {
+            const cells = {};
+            for (const k in bytesSet) {
+                const img = UPNG.decode(bytesSet[k].buffer);
+                const rgba = new Uint8ClampedArray(UPNG.toRGBA8(img)[0]);
+                const cnv = makeSurface(img.width, img.height);
+                cnv.getContext('2d').putImageData(new ImageData(rgba, img.width, img.height), 0, 0);
+                cells[k] = cnv;
+            }
+            return cells;
+        };
+
+        const bytesToBase64 = (bytes) => {
+            let bin = '';
+            const chunk = 0x8000;
+            for (let i = 0; i < bytes.length; i += chunk) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+            return btoa(bin);
+        };
+        const pngBytesToDataUrl = (bytes) => 'data:image/png;base64,' + bytesToBase64(bytes);
+
+        // Frame ids that must stay decoded: current, onion neighbours, and playback lookahead.
+        const protectedFrameIds = () => {
+            const ids = new Set();
+            const n = project.frames.length;
+            const ci = session.currentFrameIndex;
+            const add = (i) => { if (i >= 0 && i < n && project.frames[i]) ids.add(project.frames[i].id); };
+            add(ci); add(ci - 1); add(ci + 1);
+            if (session.isPlaying) for (let k = 1; k <= PLAYBACK_LOOKAHEAD; k++) add(ci + k);
+            return ids;
+        };
+        // Evict least-recently-used live frames (outside the protected set) once over budget.
+        const evictIfNeeded = () => {
+            if (cellStore.size <= DECODE_BUDGET) return;
+            const keep = protectedFrameIds();
+            const candidates = [...cellStore.keys()]
+                .filter(id => !keep.has(id))
+                .sort((a, b) => (cellLru.get(a) || 0) - (cellLru.get(b) || 0));
+            let overflow = cellStore.size - DECODE_BUDGET;
+            for (const id of candidates) {
+                if (overflow <= 0) break;
+                const cells = cellStore.get(id);
+                dormantStore.set(id, encodeFrameCells(cells));
+                for (const k in cells) { cells[k].width = 0; cells[k].height = 0; } // free backing store
+                cellStore.delete(id);
+                overflow--;
+            }
+        };
+        // Guarantee a frame's cells are decoded and resident; returns the live cell set or null
+        // when the frame has no pixel data in either tier (a brand-new frame).
+        const ensureFrameLive = (frameId) => {
+            if (cellStore.has(frameId)) { touchFrame(frameId); return cellStore.get(frameId); }
+            const bytes = dormantStore.get(frameId);
+            if (bytes) {
+                const cells = decodeFrameCells(bytes);
+                cellStore.set(frameId, cells);
+                dormantStore.delete(frameId);
+                touchFrame(frameId);
+                return cells;
+            }
+            return null;
+        };
+
         const frameCells = (frameId) => {
-            let c = cellStore.get(frameId);
-            if (!c) { c = {}; cellStore.set(frameId, c); }
+            let c = ensureFrameLive(frameId);
+            if (!c) { c = {}; cellStore.set(frameId, c); touchFrame(frameId); }
             return c;
+        };
+        // Read-only access for batch consumers (export): decode a dormant frame transiently
+        // WITHOUT promoting it into the live tier, so a full-project sweep stays memory-bounded.
+        const peekFrameCells = (frameId) => {
+            if (cellStore.has(frameId)) return cellStore.get(frameId);
+            const bytes = dormantStore.get(frameId);
+            return bytes ? decodeFrameCells(bytes) : null;
         };
         // Ensure a layer surface exists for a frame (sized to project). Layer 0 seeds with bg color.
         const cellSurface = (frame, layerId) => {
@@ -1267,32 +1395,36 @@ const createAppInstance = () => createApp({
         };
         // Deep-copy every cell of one frame into another id (frame duplication).
         const cloneCells = (srcFrameId, dstFrameId) => {
-            cellStore.set(dstFrameId, copyCellSet(cellStore.get(srcFrameId) || {}));
+            cellStore.set(dstFrameId, copyCellSet(ensureFrameLive(srcFrameId) || {}));
+            touchFrame(dstFrameId);
+            dirtyFrames.add(dstFrameId);
         };
         // Non-reactive whole-frame clipboard (timeline copy/paste).
         let frameClipboardCells = null;
 
-        // --- Cell (de)serialization for persistence (PNG blobs at the I/O boundary) ---
+        // --- Cell (de)serialization for persistence (PNG bytes at the I/O boundary) ---
         const encodeCellToBlob = (canvas) => new Promise(res => canvas.toBlob(b => res(b), 'image/png'));
+        // Dormant frames are already PNG bytes — wrap them straight into a Blob so saving does
+        // not force a decode (keeps far frames out of memory during a full save).
         const serializeFrameCells = async (frame) => {
-            const src = cellStore.get(frame.id) || {};
             const layers = {};
-            for (const k in src) layers[k] = await encodeCellToBlob(src[k]);
+            if (cellStore.has(frame.id)) {
+                const src = cellStore.get(frame.id);
+                for (const k in src) layers[k] = await encodeCellToBlob(src[k]);
+            } else if (dormantStore.has(frame.id)) {
+                const bytes = dormantStore.get(frame.id);
+                for (const k in bytes) layers[k] = new Blob([bytes[k]], { type: 'image/png' });
+            }
             return { id: frame.id, layers, thumbnail: frame.thumbnail || null };
         };
+        // Load goes lazy: keep frames dormant (compressed bytes) and decode on demand.
         const deserializeFrameCells = async (rec) => {
-            const dst = {};
+            const bytesSet = {};
             const layers = rec.layers || {};
             for (const k in layers) {
-                const surface = makeSurface(project.meta.width, project.meta.height);
-                try {
-                    const bmp = await createImageBitmap(layers[k]);
-                    surface.getContext('2d').drawImage(bmp, 0, 0);
-                    if (bmp.close) bmp.close();
-                } catch (_) {}
-                dst[k] = surface;
+                try { bytesSet[k] = new Uint8Array(await layers[k].arrayBuffer()); } catch (_) {}
             }
-            cellStore.set(rec.id, dst);
+            dormantStore.set(rec.id, bytesSet);
         };
         // Drop surfaces no longer referenced by any live frame or any structural history entry.
         const gcCells = () => {
@@ -1303,8 +1435,11 @@ const createAppInstance = () => createApp({
             scan(histories.timeline.undo);
             scan(histories.timeline.redo);
             for (const id of [...cellStore.keys()]) if (!live.has(id)) cellStore.delete(id);
+            for (const id of [...dormantStore.keys()]) if (!live.has(id)) dormantStore.delete(id);
+            for (const id of [...cellLru.keys()]) if (!live.has(id)) cellLru.delete(id);
             // A frame that is gone for good also loses its per-frame undo history.
             for (const id of [...canvasHistories.keys()]) if (!live.has(id)) canvasHistories.delete(id);
+            for (const id of [...onionMaskCache.keys()]) if (!live.has(id)) onionMaskCache.delete(id);
         };
 
         const resetSessionState = () => {
@@ -1434,6 +1569,7 @@ const createAppInstance = () => createApp({
 
             renderOnionSkin();
             renderSelectionOverlay();
+            evictIfNeeded(); // navigation just touched current + onion neighbours; trim the rest
         };
 
         // Copy the visible working canvases of a frame back into its authoritative cells.
@@ -1446,6 +1582,8 @@ const createAppInstance = () => createApp({
                 sctx.clearRect(0, 0, surface.width, surface.height);
                 sctx.drawImage(cvs, 0, 0);
             }
+            invalidateOnion(frame.id); // cells changed -> drop stale onion mask
+            dirtyFrames.add(frame.id); // needs (re)writing on next save
         };
 
         // Thumbnails are display-only; regenerate at most once per idle gap.
@@ -1523,6 +1661,8 @@ const createAppInstance = () => createApp({
                     });
                     sctx.putImageData(p.data, p.bbox.x, p.bbox.y);
                 }
+                invalidateOnion(entry.frameId); // undo/redo changed this frame's pixels
+                dirtyFrames.add(entry.frameId);
                 frame.thumbnail = generateThumbnail(frame);
                 renderCurrentFrame();
                 return { type: 'pixel', frameId: entry.frameId, patches: inversePatches };
@@ -1535,6 +1675,9 @@ const createAppInstance = () => createApp({
             };
             project.frames.splice(0, project.frames.length, ...entry.order);
             session.currentFrameIndex = Math.max(0, Math.min(entry.index, project.frames.length - 1));
+            // A restored frame may have had its IDB record deleted as an orphan; ensure every
+            // current frame is (re)written on the next save so structural undo never loses data.
+            project.frames.forEach(f => dirtyFrames.add(f.id));
             renderCurrentFrame();
             return inverse;
         };
@@ -1657,6 +1800,7 @@ const createAppInstance = () => createApp({
             const baseSmoothing = Math.min(SMOOTHING_MAX, Math.max(SMOOTHING_MIN, settings.penSmoothing || SMOOTHING_MIN));
             const smoothing = 1 - Math.pow(1 - baseSmoothing, dtSec / BASE_FRAME_SEC);
 
+            let dabPts;
             if (!lastPoint || !smoothedPoint) {
                 smoothedPoint = {
                     ...targetPoint
@@ -1668,7 +1812,9 @@ const createAppInstance = () => createApp({
                 ctx.moveTo(targetPoint.x, targetPoint.y);
                 ctx.lineTo(targetPoint.x, targetPoint.y); // Dot
                 ctx.stroke();
+                dabPts = [targetPoint];
             } else {
+                const fromPoint = lastPoint; // moveTo origin (before reassignment below)
                 smoothedPoint = {
                     x: smoothedPoint.x + (targetPoint.x - smoothedPoint.x) * smoothing,
                     y: smoothedPoint.y + (targetPoint.y - smoothedPoint.y) * smoothing
@@ -1676,13 +1822,23 @@ const createAppInstance = () => createApp({
 
                 // Quadratic Curve Interpolation with smoothing
                 ctx.beginPath();
-                ctx.moveTo(lastPoint.x, lastPoint.y);
-                const midX = (lastPoint.x + smoothedPoint.x) / 2;
-                const midY = (lastPoint.y + smoothedPoint.y) / 2;
+                ctx.moveTo(fromPoint.x, fromPoint.y);
+                const midX = (fromPoint.x + smoothedPoint.x) / 2;
+                const midY = (fromPoint.y + smoothedPoint.y) / 2;
                 ctx.quadraticCurveTo(smoothedPoint.x, smoothedPoint.y, midX, midY);
                 ctx.lineTo(smoothedPoint.x, smoothedPoint.y);
                 ctx.stroke();
+                dabPts = [fromPoint, smoothedPoint];
             }
+            // Track the painted region so commit reads back only this rectangle.
+            const half = ctx.lineWidth / 2 + 2; // round cap + antialias margin
+            const xs = dabPts.map(p => p.x), ys = dabPts.map(p => p.y);
+            const minX = Math.min(...xs), minY = Math.min(...ys);
+            expandDirty(session.currentLayerId, {
+                x: minX - half, y: minY - half,
+                w: (Math.max(...xs) - minX) + half * 2,
+                h: (Math.max(...ys) - minY) + half * 2
+            });
             lastPoint = {
                 ...smoothedPoint
             };
@@ -2105,55 +2261,68 @@ const createAppInstance = () => createApp({
             targetCtx.globalCompositeOperation = 'source-over';
         };
 
-        const drawTintedFrame = (ctx, frame, color, opacity) => {
-            // Flatten frame layers to an offscreen canvas
-            const off = document.createElement('canvas');
-            off.width = project.meta.width;
-            off.height = project.meta.height;
-            const offCtx = off.getContext('2d');
+        // Build (or reuse) the masked, pre-tint shape for a frame. The luminance loop runs
+        // only on a cache miss (settings changed, size changed, or the frame was edited).
+        const getOnionMask = (frame) => {
+            const w = project.meta.width, h = project.meta.height;
+            const isActive = settings.onionSkin.target === 'active';
+            const threshold = (settings.onionSkin.luminanceThreshold ?? 0.9) * 255; // 0-255
+            // Onion reflects the same layers you see: visible draw layers, filtered by target
+            // (active = current layer only). Signature covers everything but tint/opacity, which
+            // are applied at blit time. Layer visibility is part of the sig so toggling a layer
+            // hidden invalidates the cached mask; 'active' target also depends on currentLayerId.
+            const drawVis = project.layers.filter(l => l.type === 'draw').map(l => l.visible ? 1 : 0).join('');
+            const sig = `${isActive ? 'A' + session.currentLayerId : 'all'}|${threshold}|${drawVis}`;
 
-            const enabledLayerIds = Object.entries(settings.onionSkin.layers || {}).filter(([_, v]) => v).map(([k]) => Number(k));
-            const targetLayers = settings.onionSkin.target === 'active' ?
-                project.layers.filter(l => l.id === session.currentLayerId && enabledLayerIds.includes(l.id)) :
-                project.layers.filter(l => l.type === 'draw' && enabledLayerIds.includes(l.id)); // Include background if it's 'draw' type (which it is now)
+            const cached = onionMaskCache.get(frame.id);
+            if (cached && cached.sig === sig && cached.w === w && cached.h === h) return cached.canvas;
 
-            // Draw layers straight from their cell surfaces
+            const targetLayers = isActive ?
+                project.layers.filter(l => l.id === session.currentLayerId && l.type === 'draw') :
+                project.layers.filter(l => l.type === 'draw');
+
+            const off = (cached && cached.canvas) || makeSurface(w, h);
+            off.width = w; off.height = h; // also clears
+            const offCtx = off.getContext('2d', { willReadFrequently: true });
             for (const layer of targetLayers) {
                 if (!layer.visible) continue;
                 offCtx.drawImage(cellSurface(frame, layer.id), 0, 0);
             }
 
-            // Luminance Masking
-            // Filter out bright pixels (background) based on threshold
-            const imgData = offCtx.getImageData(0, 0, off.width, off.height);
+            // Luminance masking: drop bright pixels (background) so only ink remains.
+            const imgData = offCtx.getImageData(0, 0, w, h);
             const data = imgData.data;
-            const threshold = (settings.onionSkin.luminanceThreshold ?? 0.9) * 255; // 0-255
-
             for (let i = 0; i < data.length; i += 4) {
-                const r = data[i];
-                const g = data[i + 1];
-                const b = data[i + 2];
-                const a = data[i + 3];
-
-                if (a > 0) {
-                    // Calculate luminance (perceptual)
-                    // Y = 0.299R + 0.587G + 0.114B
-                    const luminance = 0.299 * r + 0.587 * g + 0.114 * b;
-                    if (luminance > threshold) {
-                        data[i + 3] = 0; // Make transparent
-                    }
+                if (data[i + 3] > 0) {
+                    const luminance = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+                    if (luminance > threshold) data[i + 3] = 0;
                 }
             }
             offCtx.putImageData(imgData, 0, 0);
 
-            // Tint
-            offCtx.globalCompositeOperation = 'source-in';
-            offCtx.fillStyle = color;
-            offCtx.fillRect(0, 0, off.width, off.height);
+            onionMaskCache.set(frame.id, { sig, w, h, canvas: off });
+            return off;
+        };
 
-            // Draw to Onion Canvas
+        const drawTintedFrame = (ctx, frame, color, opacity) => {
+            const w = project.meta.width, h = project.meta.height;
+            const mask = getOnionMask(frame);
+
+            // Tint the cached shape into a reused scratch buffer (cheap composite, no JS loop).
+            if (!onionTintBuffer) onionTintBuffer = makeSurface(w, h);
+            else if (onionTintBuffer.width !== w || onionTintBuffer.height !== h) {
+                onionTintBuffer.width = w; onionTintBuffer.height = h;
+            }
+            const tctx = onionTintBuffer.getContext('2d');
+            tctx.globalCompositeOperation = 'copy';
+            tctx.drawImage(mask, 0, 0);
+            tctx.globalCompositeOperation = 'source-in';
+            tctx.fillStyle = color;
+            tctx.fillRect(0, 0, w, h);
+            tctx.globalCompositeOperation = 'source-over';
+
             ctx.globalAlpha = opacity;
-            ctx.drawImage(off, 0, 0);
+            ctx.drawImage(onionTintBuffer, 0, 0);
             ctx.globalAlpha = 1.0;
         };
 
@@ -2248,6 +2417,15 @@ const createAppInstance = () => createApp({
 
                 // Right click = Eraser
                 session.isRightClick = (e.button === 2);
+
+                // Block edits on a hidden/locked layer (eyedropper is read-only; pan handled above).
+                const editsPixels = session.isRightClick ||
+                    ['pen', 'eraser', 'bucket', 'select-rect', 'select-lasso', 'move'].includes(session.tool);
+                if (editsPixels && !isCurrentLayerEditable()) {
+                    session.isRightClick = false;
+                    session.isDrawing = false;
+                    return;
+                }
 
                 const pos = getPointerPos(e);
                 const x = pos.x;
@@ -2472,17 +2650,29 @@ const createAppInstance = () => createApp({
                         ctx.lineWidth = size * (p + 0.5);
                         ctx.globalCompositeOperation = (session.tool === 'eraser' || wasRightClick) ? 'destination-out' : 'source-over';
 
+                        let dabPts;
                         if (!lastPoint) {
                             ctx.beginPath();
                             ctx.moveTo(pos.x, pos.y);
                             ctx.lineTo(pos.x, pos.y);
                             ctx.stroke();
+                            dabPts = [pos];
                         } else {
                             ctx.beginPath();
                             ctx.moveTo(lastPoint.x, lastPoint.y);
                             ctx.lineTo(pos.x, pos.y);
                             ctx.stroke();
+                            dabPts = [lastPoint, pos];
                         }
+                        // Track this final segment too (it is drawn directly, not via drawStroke).
+                        const half = ctx.lineWidth / 2 + 2;
+                        const xs = dabPts.map(p => p.x), ys = dabPts.map(p => p.y);
+                        const minX = Math.min(...xs), minY = Math.min(...ys);
+                        expandDirty(session.currentLayerId, {
+                            x: minX - half, y: minY - half,
+                            w: (Math.max(...xs) - minX) + half * 2,
+                            h: (Math.max(...ys) - minY) + half * 2
+                        });
                         lastPoint = { x: pos.x, y: pos.y };
                         smoothedPoint = { ...lastPoint };
                     }
@@ -2505,6 +2695,8 @@ const createAppInstance = () => createApp({
         // --- Actions ---
         const actions = {
             async initProject(metaOverrides = null) {
+                clearOnionCache();
+                dirtyFrames.clear();
                 project.frames = [];
                 project.id = generateUUID();
                 project.meta.createdAt = Date.now();
@@ -2516,7 +2708,6 @@ const createAppInstance = () => createApp({
                     project.meta.fps = metaOverrides.fps;
                     settings.backgroundColor = metaOverrides.backgroundColor || settings.backgroundColor;
                 }
-                syncOnionLayerSelection();
                 session.selection.active = false;
                 session.selection.path = [];
                 session.selection.originPath = null;
@@ -2553,6 +2744,7 @@ const createAppInstance = () => createApp({
                     cloneCells(currentFrame.value.id, newFrame.id);
                 }
                 normalizeFrame(newFrame);
+                dirtyFrames.add(newFrame.id); // persist this frame on the next save
                 newFrame.thumbnail = generateThumbnail(newFrame);
                 recordStructural();
                 const insertAt = insertMode === 'end'
@@ -2560,7 +2752,6 @@ const createAppInstance = () => createApp({
                     : Math.min(project.frames.length, session.currentFrameIndex + 1);
                 project.frames.splice(insertAt, 0, newFrame);
                 await actions.gotoFrame(insertAt);
-                //triggerAutoSave();
             },
 
             async deleteFrame(idx) {
@@ -2574,7 +2765,6 @@ const createAppInstance = () => createApp({
                 }
                 await renderCurrentFrame();
                 updateHistoryState();
-                //triggerAutoSave();
             },
 
             async gotoFrame(idx) {
@@ -2613,7 +2803,7 @@ const createAppInstance = () => createApp({
                 }
             },
 
-            async saveProject() {
+            async saveProject({ silent = false } = {}) {
                 await commitFloatingSelection();
                 if (currentFrame.value) flushFrameCells(currentFrame.value);
                 const db = await dbPromise;
@@ -2635,17 +2825,27 @@ const createAppInstance = () => createApp({
                 };
 
                 try {
-                    // Encode all cells first; an IDB transaction must not span non-IDB awaits.
+                    // Incremental save: only re-encode frames changed since the last save.
+                    // Encode first — an IDB transaction must not span non-IDB awaits.
                     const records = [];
-                    for (const f of frames) records.push(await serializeFrameCells(f));
+                    for (const f of frames) if (dirtyFrames.has(f.id)) records.push(await serializeFrameCells(f));
+                    // Project-scoped orphan cleanup: drop records for frames this project no
+                    // longer references (the 'frames' store is shared across projects, so we
+                    // diff against THIS project's previously-saved id list, never global keys).
+                    const prev = await db.get('projects', rawProject.id);
+                    const prevIds = (prev && prev.frames) || [];
+                    const liveIds = new Set(frames.map(f => f.id));
+
                     const tx = db.transaction(['projects', 'frames'], 'readwrite');
                     tx.objectStore('projects').put(meta);
                     const frameStore = tx.objectStore('frames');
                     for (const r of records) frameStore.put(r);
+                    for (const id of prevIds) if (!liveIds.has(id)) frameStore.delete(id);
                     await tx.done;
-                    alert('Saved!');
+                    dirtyFrames.clear();
+                    if (!silent) alert('Saved!');
                 } catch (e) {
-                    alert('Save failed: ' + e.message);
+                    if (!silent) alert('Save failed: ' + e.message);
                 }
             },
 
@@ -2664,9 +2864,14 @@ const createAppInstance = () => createApp({
                 const rawSession = toRaw(session);
                 // Pixel data is serialized to PNG data URLs only here, at the I/O boundary.
                 const framesOut = rawProject.frames.map(f => {
-                    const cells = cellStore.get(f.id) || {};
                     const layers = {};
-                    for (const k in cells) layers[k] = cells[k].toDataURL('image/png');
+                    if (cellStore.has(f.id)) {
+                        const cells = cellStore.get(f.id);
+                        for (const k in cells) layers[k] = cells[k].toDataURL('image/png');
+                    } else if (dormantStore.has(f.id)) {
+                        const bytes = dormantStore.get(f.id);
+                        for (const k in bytes) layers[k] = pngBytesToDataUrl(bytes[k]);
+                    }
                     return { id: f.id, layers, thumbnail: f.thumbnail || null };
                 });
                 const data = JSON.stringify({
@@ -2722,12 +2927,16 @@ const createAppInstance = () => createApp({
                         }
 
                         project.layers = project.layers.map(l => {
-                            if (l.id === 0) return { ...l, locked: false, type: 'draw' };
-                            return { ...l, locked: false, type: l.type === 'fill' ? 'draw' : l.type };
+                            if (l.id === 0) return { ...l, type: 'draw' };
+                            return { ...l, type: l.type === 'fill' ? 'draw' : l.type };
                         });
 
                         // Rebuild cells from the data URLs in the JSON.
                         cellStore.clear();
+                        dormantStore.clear();
+                        cellLru.clear();
+                        dirtyFrames.clear();
+                        clearOnionCache();
                         frameClipboardCells = null;
                         const framesIn = Array.isArray(loadedFrames) ? loadedFrames : [];
                         const frameMeta = [];
@@ -2745,9 +2954,9 @@ const createAppInstance = () => createApp({
                             frameMeta.push({ id, thumbnail: f.thumbnail || null });
                         }
                         project.frames = frameMeta;
+                        frameMeta.forEach(f => dirtyFrames.add(f.id)); // imported -> not yet in IDB
                         if (project.frames.length === 0) { project.frames = []; ensureFrame(0); }
                         session.currentFrameIndex = 0;
-                        syncOnionLayerSelection();
                         resetAllHistory();
                         await nextTick();
                         renderCurrentFrame();
@@ -2838,6 +3047,7 @@ const createAppInstance = () => createApp({
             async paste() {
                 if (session.isPlaying) return;
                 if (!session.clipboard || session.clipboard.type !== 'image') return;
+                if (!isCurrentLayerEditable()) return; // can't paste onto a hidden/locked layer
 
                 // If selection active, anchor it first
                 await commitFloatingSelection();
@@ -2952,6 +3162,7 @@ const createAppInstance = () => createApp({
                 const target = (idx ?? session.currentFrameIndex);
                 const frame = { id: generateUUID(), thumbnail: null };
                 normalizeFrame(frame);
+                dirtyFrames.add(frame.id);
                 frame.thumbnail = generateThumbnail(frame);
                 recordStructural();
                 project.frames.splice(target + 1, 0, frame);
@@ -2962,7 +3173,7 @@ const createAppInstance = () => createApp({
                 const frame = project.frames[idx];
                 if (!frame) return;
                 if (idx === session.currentFrameIndex) flushFrameCells(frame);
-                frameClipboardCells = copyCellSet(cellStore.get(frame.id) || {});
+                frameClipboardCells = copyCellSet(ensureFrameLive(frame.id) || {});
                 frameContext.visible = false;
             },
 
@@ -2973,6 +3184,8 @@ const createAppInstance = () => createApp({
                 const target = (idx ?? session.currentFrameIndex);
                 const cloned = { id: generateUUID(), thumbnail: null };
                 cellStore.set(cloned.id, copyCellSet(frameClipboardCells));
+                touchFrame(cloned.id);
+                dirtyFrames.add(cloned.id);
                 normalizeFrame(cloned);
                 cloned.thumbnail = generateThumbnail(cloned);
                 recordStructural();
@@ -3015,18 +3228,12 @@ const createAppInstance = () => createApp({
                     fps,
                     backgroundColor: newProjectForm.backgroundColor || settings.backgroundColor
                 });
-                triggerAutoSave();
+                await actions.saveProject({ silent: true });
             },
 
             async clearDatabase() {
                 if (!confirm("DANGER: This will delete all saved projects and reset the application. Are you sure?")) return;
                 try {
-                    // Stop auto-save
-                    if (autoSaveTimer) {
-                        clearTimeout(autoSaveTimer);
-                        autoSaveTimer = null;
-                    }
-
                     // Close existing DB connection to avoid blocking delete
                     try {
                         const db = await dbPromise;
@@ -3062,46 +3269,6 @@ const createAppInstance = () => createApp({
             }, 1000 / getSafeFps());
         };
 
-        // --- Auto Save & Persistence ---
-        let autoSaveTimer = null;
-        const saveProjectSilent = async () => {
-            const db = await dbPromise;
-            if (currentFrame.value) flushFrameCells(currentFrame.value);
-            const rawProject = toRaw(project);
-            const rawSettings = toRaw(settings);
-            const rawSession = toRaw(session);
-
-            // Separate metadata and frames
-            const frames = rawProject.frames;
-            const { settings: _projectSettings, sessionState: _projectSessionState, ...projectData } = rawProject;
-            const meta = {
-                ...projectData,
-                frames: frames.map(f => f.id), // Store IDs only in meta
-                // Persist settings and session state
-                settings: rawSettings,
-                sessionState: {
-                    colors: rawSession.colors,
-                    brush: rawSession.brush
-                },
-                modifiedAt: Date.now()
-            };
-
-            // Encode all cells first; an IDB transaction must not span non-IDB awaits.
-            const records = [];
-            for (const f of frames) records.push(await serializeFrameCells(f));
-
-            const tx = db.transaction(['projects', 'frames'], 'readwrite');
-            tx.objectStore('projects').put(meta);
-            const frameStore = tx.objectStore('frames');
-            for (const r of records) frameStore.put(r);
-
-            await tx.done;
-        };
-        const triggerAutoSave = () => {
-            // Instant save when triggered, no debounce
-            saveProjectSilent();
-        };
-
         const commitFloatingSelection = async () => {
             if (session.selection.active) {
                 await anchorSelection();
@@ -3118,9 +3285,11 @@ const createAppInstance = () => createApp({
             ctx.globalCompositeOperation = 'source-over';
             ctx.clearRect(0, 0, w, h);
 
+            const cells = peekFrameCells(frame.id) || {};
             for (const layer of drawingLayers.value) {
                 if (!layer.visible) continue;
-                ctx.drawImage(cellSurface(frame, layer.id), 0, 0);
+                const surface = cells[layer.id];
+                if (surface) ctx.drawImage(surface, 0, 0);
             }
         };
 
@@ -3129,6 +3298,71 @@ const createAppInstance = () => createApp({
             isLoading.value = true;
             await nextTick();
             await new Promise(resolve => requestAnimationFrame(resolve));
+        };
+
+        // --- Export encode worker (offloads UPNG / fflate off the main thread) ---
+        // Kept inline (single-HTML constraint) via a Blob URL; the worker importScripts() the
+        // vendor libs by absolute URL. If a Worker can't be created (e.g. file://), callers
+        // fall back to encoding on the main thread, so export always works.
+        const EXPORT_WORKER_SRC = `
+            let ready = false;
+            self.onmessage = (e) => {
+                const m = e.data;
+                try {
+                    if (m.type === 'init') {
+                        importScripts(m.base + 'vendor/pako.min.js', m.base + 'vendor/UPNG.min.js', m.base + 'vendor/fflate.min.js');
+                        ready = true;
+                        self.postMessage({ id: m.id, ok: true });
+                        return;
+                    }
+                    if (m.type === 'apng') {
+                        const png = UPNG.encode(m.frames, m.w, m.h, 0, m.delays);
+                        self.postMessage({ id: m.id, ok: true, result: png }, [png]);
+                    } else if (m.type === 'zip') {
+                        const files = {};
+                        for (let i = 0; i < m.frames.length; i++) files[m.names[i]] = new Uint8Array(UPNG.encode([m.frames[i]], m.w, m.h, 0));
+                        const zipped = fflate.zipSync(files, {});
+                        self.postMessage({ id: m.id, ok: true, result: zipped.buffer }, [zipped.buffer]);
+                    }
+                } catch (err) {
+                    self.postMessage({ id: m.id, ok: false, error: String((err && err.message) || err) });
+                }
+            };
+        `;
+        let exportWorker = null;
+        let exportWorkerReady = null;
+        let exportMsgId = 0;
+        const exportPending = new Map();
+        const getExportWorker = () => {
+            if (exportWorkerReady) return exportWorkerReady;
+            exportWorkerReady = new Promise((resolve, reject) => {
+                try {
+                    const url = URL.createObjectURL(new Blob([EXPORT_WORKER_SRC], { type: 'text/javascript' }));
+                    const w = new Worker(url);
+                    w.onmessage = (e) => {
+                        const p = exportPending.get(e.data.id);
+                        if (!p) return;
+                        exportPending.delete(e.data.id);
+                        e.data.ok ? p.resolve(e.data.result) : p.reject(new Error(e.data.error));
+                    };
+                    w.onerror = () => reject(new Error('export worker error'));
+                    const id = ++exportMsgId;
+                    exportPending.set(id, { resolve: () => { exportWorker = w; resolve(w); }, reject });
+                    w.postMessage({ type: 'init', id, base: location.href.replace(/[^/]*$/, '') });
+                } catch (err) { reject(err); }
+            }).catch(() => null); // null -> caller falls back to the main thread
+            return exportWorkerReady;
+        };
+        const callExportWorker = (msg, transfers) => new Promise((resolve, reject) => {
+            const id = ++exportMsgId;
+            exportPending.set(id, { resolve, reject });
+            exportWorker.postMessage({ ...msg, id }, transfers || []);
+        });
+        // Compose a frame to RGBA bytes, yielding to the UI every few frames during a sweep.
+        const composeFrameBuf = async (ctx, frame, w, h, i) => {
+            await drawFrameToContext(ctx, frame);
+            if ((i & 3) === 0) await new Promise(r => requestAnimationFrame(r));
+            return new Uint8Array(ctx.getImageData(0, 0, w, h).data).buffer;
         };
 
         const exportAPNG = async () => {
@@ -3145,15 +3379,15 @@ const createAppInstance = () => createApp({
                 off.height = h;
                 const ctx = off.getContext('2d');
 
-                for (const frame of project.frames) {
-                    await drawFrameToContext(ctx, frame);
-                    const data = ctx.getImageData(0, 0, w, h).data;
-                    // UPNG expects an ArrayBuffer per frame; copy to detach from canvas backing store
-                    bufs.push(new Uint8Array(data).buffer);
+                for (let i = 0; i < project.frames.length; i++) {
+                    bufs.push(await composeFrameBuf(ctx, project.frames[i], w, h, i));
                 }
 
                 const delays = project.frames.map(() => Math.max(1, Math.round(1000 / getSafeFps())));
-                const apng = UPNG.encode(bufs, w, h, 0, delays);
+                const worker = await getExportWorker();
+                const apng = worker
+                    ? await callExportWorker({ type: 'apng', frames: bufs, w, h, delays }, bufs)
+                    : UPNG.encode(bufs, w, h, 0, delays);
 
                 const blob = new Blob([apng], { type: "image/png" });
                 const url = URL.createObjectURL(blob);
@@ -3175,25 +3409,29 @@ const createAppInstance = () => createApp({
             await commitFloatingSelection();
             await showLoadingOverlay();
             try {
-                const files = {};
+                const w = project.meta.width;
+                const h = project.meta.height;
                 const off = document.createElement('canvas');
-                off.width = project.meta.width;
-                off.height = project.meta.height;
+                off.width = w;
+                off.height = h;
                 const ctx = off.getContext('2d');
 
+                const bufs = [];
+                const names = [];
                 for (let i = 0; i < project.frames.length; i++) {
-                    const frame = project.frames[i];
-                    await drawFrameToContext(ctx, frame);
-
-                    const blob = await new Promise((resolve, reject) => {
-                        off.toBlob(b => b ? resolve(b) : reject(new Error('Canvas export failed')), 'image/png');
-                    });
-                    const buf = await blob.arrayBuffer();
-                    const name = `frame_${String(i+1).padStart(3, '0')}.png`;
-                    files[name] = new Uint8Array(buf);
+                    bufs.push(await composeFrameBuf(ctx, project.frames[i], w, h, i));
+                    names.push(`frame_${String(i + 1).padStart(3, '0')}.png`);
                 }
 
-                const zip = fflate.zipSync(files);
+                const worker = await getExportWorker();
+                let zip;
+                if (worker) {
+                    zip = new Uint8Array(await callExportWorker({ type: 'zip', frames: bufs, names, w, h }, bufs));
+                } else {
+                    const files = {};
+                    for (let i = 0; i < bufs.length; i++) files[names[i]] = new Uint8Array(UPNG.encode([bufs[i]], w, h, 0));
+                    zip = fflate.zipSync(files);
+                }
                 const blob = new Blob([zip], { type: "application/zip" });
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement('a');
@@ -3235,9 +3473,10 @@ const createAppInstance = () => createApp({
                     height: h
                 });
 
-                for (const frame of project.frames) {
-                    await drawFrameToContext(ctx, frame);
+                for (let i = 0; i < project.frames.length; i++) {
+                    await drawFrameToContext(ctx, project.frames[i]);
                     await writer.addFrame(off);
+                    if ((i & 3) === 0) await new Promise(r => requestAnimationFrame(r));
                 }
 
                 const output = await writer.complete();
@@ -3339,12 +3578,15 @@ const createAppInstance = () => createApp({
 
             project.layers = project.layers.map(l => ({
                 ...l,
-                locked: false,
                 type: l.type === 'fill' ? 'draw' : l.type
             }));
 
             // Rebuild cells from stored PNG blobs (project.meta is already set above).
             cellStore.clear();
+            dormantStore.clear();
+            cellLru.clear();
+            dirtyFrames.clear(); // loaded frames are already persisted (clean)
+            clearOnionCache();
             frameClipboardCells = null;
             for (const rec of records) await deserializeFrameCells(rec);
             project.frames = records.map(rec => ({ id: rec.id, thumbnail: rec.thumbnail || null }));
@@ -3354,7 +3596,6 @@ const createAppInstance = () => createApp({
             }
 
             session.currentFrameIndex = 0;
-            syncOnionLayerSelection();
             resetAllHistory();
             await nextTick();
             renderCurrentFrame();
@@ -3402,7 +3643,7 @@ const createAppInstance = () => createApp({
             showProjectsModal.value = false;
         };
         const deleteProjectById = async (id) => {
-            if (!confirm('このプロジェクトを削除しますか？この操作は元に戻せません。')) return;
+            if (!confirm('Delete this project? This cannot be undone.')) return;
             const db = await dbPromise;
             const target = await db.get('projects', id);
             if (!target) return;
@@ -3446,7 +3687,6 @@ const createAppInstance = () => createApp({
             } else {
                 await actions.initProject();
             }
-            syncOnionLayerSelection();
 
             await nextTick();
             renderCurrentFrame();
@@ -3563,8 +3803,13 @@ const createAppInstance = () => createApp({
             });
 
             // Route Ctrl+Z/Y to the area last touched: the timeline bar vs everything else.
+            // Timeline history is ephemeral, so only adopt 'timeline' scope when it actually has
+            // something to undo/redo; otherwise (e.g. just navigating between frames) stay on
+            // 'canvas' so the current frame's drawing history remains reachable.
             window.addEventListener('pointerdown', (e) => {
-                const scope = (e.target.closest && e.target.closest('.timeline')) ? 'timeline' : 'canvas';
+                const overTimeline = e.target.closest && e.target.closest('.timeline');
+                const hasTimelineHistory = histories.timeline.undo.length > 0 || histories.timeline.redo.length > 0;
+                const scope = (overTimeline && hasTimelineHistory) ? 'timeline' : 'canvas';
                 if (session.activeScope !== scope) {
                     session.activeScope = scope;
                     updateHistoryState();
@@ -3656,6 +3901,11 @@ const createAppInstance = () => createApp({
                 deep: true
             });
             watch(() => project.layers.map(l => ({ id: l.id, visible: l.visible })), () => {
+                renderOnionSkin();
+            });
+            // In 'active' target mode the onion follows the current layer; changing it (without a
+            // frame re-render) must refresh the onion. Harmless no-op in 'all' mode (cached).
+            watch(() => session.currentLayerId, () => {
                 renderOnionSkin();
             });
 
