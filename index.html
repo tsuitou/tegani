@@ -1241,11 +1241,103 @@ const createAppInstance = () => createApp({
             while (stack.length > limit) stack.shift();
         };
         let pendingEdit = null;
+        let pendingSelectionBefore = null;
+        let pendingMoveSelectionBefore = null;
+
+        const cloneImageData = (img) => {
+            if (!img) return null;
+            return new ImageData(new Uint8ClampedArray(img.data), img.width, img.height);
+        };
+
+        const clonePointList = (points) => points ? points.map(p => ({ x: p.x, y: p.y })) : points;
+        const cloneRect = (rect) => rect ? { x: rect.x, y: rect.y, w: rect.w, h: rect.h } : rect;
+        const clonePos = (pos) => pos ? { x: pos.x, y: pos.y } : pos;
+
+        const snapshotSelectionState = () => ({
+            active: !!session.selection.active,
+            path: clonePointList(session.selection.path || []),
+            originPath: clonePointList(session.selection.originPath),
+            rect: cloneRect(session.selection.rect),
+            floatingData: cloneImageData(session.selection.floatingData),
+            floatingPos: clonePos(session.selection.floatingPos),
+            initialPos: clonePos(session.selection.initialPos),
+            dirty: !!session.selection.dirty
+        });
+
+        const samePointList = (a, b) => {
+            if (a === b) return true;
+            if (!a || !b || a.length !== b.length) return false;
+            return a.every((p, i) => p.x === b[i].x && p.y === b[i].y);
+        };
+        const sameRect = (a, b) => {
+            if (a === b) return true;
+            if (!a || !b) return false;
+            return a.x === b.x && a.y === b.y && a.w === b.w && a.h === b.h;
+        };
+        const samePos = (a, b) => {
+            if (a === b) return true;
+            if (!a || !b) return false;
+            return a.x === b.x && a.y === b.y;
+        };
+        const sameImageData = (a, b) => {
+            if (a === b) return true;
+            if (!a || !b || a.width !== b.width || a.height !== b.height || a.data.length !== b.data.length) return false;
+            for (let i = 0; i < a.data.length; i++) {
+                if (a.data[i] !== b.data[i]) return false;
+            }
+            return true;
+        };
+        const sameSelectionState = (a, b) => {
+            if (!a || !b) return false;
+            return a.active === b.active &&
+                a.dirty === b.dirty &&
+                samePointList(a.path, b.path) &&
+                samePointList(a.originPath, b.originPath) &&
+                sameRect(a.rect, b.rect) &&
+                samePos(a.floatingPos, b.floatingPos) &&
+                samePos(a.initialPos, b.initialPos) &&
+                sameImageData(a.floatingData, b.floatingData);
+        };
+
+        const restoreSelectionState = (state) => {
+            if (!state) return;
+            session.selection.active = !!state.active;
+            session.selection.path = clonePointList(state.path || []);
+            session.selection.originPath = clonePointList(state.originPath);
+            session.selection.rect = cloneRect(state.rect);
+            session.selection.floatingData = cloneImageData(state.floatingData);
+            session.selection.floatingPos = clonePos(state.floatingPos) || { x: 0, y: 0 };
+            session.selection.initialPos = clonePos(state.initialPos);
+            session.selection.dirty = !!state.dirty;
+            const ctx = getTempCtx();
+            if (ctx) {
+                clearCanvas(ctx);
+                renderSelectionOverlay();
+            }
+        };
+
+        const recordSelectionHistory = (before, after) => {
+            if (session.isPlaying || !before || !after || sameSelectionState(before, after)) return;
+            const frame = currentFrame.value;
+            if (!frame) return;
+            const ch = canvasHistory(frame.id);
+            ch.undo.push({ type: 'selection', frameId: frame.id, selection: before });
+            ch.redo = [];
+            histories.timeline.undo = [];
+            histories.timeline.redo = [];
+            session.activeScope = 'canvas';
+            trimStack(ch.undo);
+            updateHistoryState();
+            gcCells();
+        };
+
         const resetAllHistory = () => {
             canvasHistories.clear();
             histories.timeline.undo = [];
             histories.timeline.redo = [];
             pendingEdit = null;
+            pendingSelectionBefore = null;
+            pendingMoveSelectionBefore = null;
             updateHistoryState();
         };
 
@@ -1288,7 +1380,7 @@ const createAppInstance = () => createApp({
                 before[id] = snap;
                 dirty[id] = null;
             }
-            pendingEdit = { frameId: frame.id, before, dirty };
+            pendingEdit = { frameId: frame.id, before, dirty, selection: snapshotSelectionState() };
         };
         const commitPixelEdit = () => {
             if (!pendingEdit) return;
@@ -1315,11 +1407,12 @@ const createAppInstance = () => createApp({
                 }
             }
             const frameId = pendingEdit.frameId;
+            const selection = pendingEdit.selection;
             pendingEdit = null;
             if (patches.length) {
                 invalidateOnion(frameId); // edited frame's onion shape is now stale
                 const ch = canvasHistory(frameId);
-                ch.undo.push({ type: 'pixel', frameId, patches });
+                ch.undo.push({ type: 'pixel', frameId, patches, selection });
                 ch.redo = [];
                 // A canvas edit invalidates the ephemeral timeline take-backs.
                 histories.timeline.undo = [];
@@ -1760,6 +1853,7 @@ const createAppInstance = () => createApp({
                 if (idx === -1) return null; // Frame no longer exists (e.g. structurally removed); skip
                 session.currentFrameIndex = idx;
                 const frame = project.frames[idx];
+                const inverseSelection = snapshotSelectionState();
                 const inversePatches = [];
                 for (const p of entry.patches) {
                     const surface = cellSurface(frame, p.layerId);
@@ -1776,7 +1870,21 @@ const createAppInstance = () => createApp({
                 dirtyFrames.add(entry.frameId);
                 frame.thumbnail = generateThumbnail(frame);
                 renderCurrentFrame();
-                return { type: 'pixel', frameId: entry.frameId, patches: inversePatches };
+                restoreSelectionState(entry.selection);
+                return { type: 'pixel', frameId: entry.frameId, patches: inversePatches, selection: inverseSelection };
+            }
+            if (entry.type === 'selection') {
+                const idx = project.frames.findIndex(f => f.id === entry.frameId);
+                if (idx === -1) return null;
+                session.currentFrameIndex = idx;
+                renderCurrentFrame();
+                const inverse = {
+                    type: 'selection',
+                    frameId: entry.frameId,
+                    selection: snapshotSelectionState()
+                };
+                restoreSelectionState(entry.selection);
+                return inverse;
             }
             // structural
             const inverse = {
@@ -1800,6 +1908,7 @@ const createAppInstance = () => createApp({
                 session.selection.path = [];
                 session.selection.originPath = null;
                 session.selection.rect = null;
+                session.selection.initialPos = null;
                 session.selection.dirty = false;
                 const ctx = getTempCtx();
                 if (ctx) clearCanvas(ctx);
@@ -1888,6 +1997,8 @@ const createAppInstance = () => createApp({
         };
 
         const drawStroke = (ctx, x, y, pressure = 0.5, dtSec = BASE_FRAME_SEC) => {
+            ctx.save();
+            applySelectionClip(ctx);
             ctx.lineCap = 'round';
             ctx.lineJoin = 'round';
             ctx.strokeStyle = session.colors.primary;
@@ -1895,7 +2006,8 @@ const createAppInstance = () => createApp({
 
             // Pressure sensitivity toggle
             const p = settings.pressureSensitivity ? pressure : 0.5;
-            ctx.lineWidth = size * (p + 0.5);
+            const strokeWidth = size * (p + 0.5);
+            ctx.lineWidth = strokeWidth;
             const targetPoint = {
                 x,
                 y
@@ -1941,8 +2053,9 @@ const createAppInstance = () => createApp({
                 ctx.stroke();
                 dabPts = [fromPoint, smoothedPoint];
             }
+            ctx.restore();
             // Track the painted region so commit reads back only this rectangle.
-            const half = ctx.lineWidth / 2 + 2; // round cap + antialias margin
+            const half = strokeWidth / 2 + 2; // round cap + antialias margin
             const xs = dabPts.map(p => p.x), ys = dabPts.map(p => p.y);
             const minX = Math.min(...xs), minY = Math.min(...ys);
             expandDirty(session.currentLayerId, {
@@ -1962,7 +2075,16 @@ const createAppInstance = () => createApp({
 
             const w = project.meta.width;
             const h = project.meta.height;
-            if (startX < 0 || startY < 0 || startX >= w || startY >= h) return;
+            if (startX < 0 || startY < 0 || startX >= w || startY >= h) {
+                pendingEdit = null;
+                return;
+            }
+            const selectionMask = getSelectionMaskData();
+            const insideSelection = (x, y) => !selectionMask || selectionMask[(y * w + x) * 4 + 3] > 0;
+            if (!insideSelection(startX, startY)) {
+                pendingEdit = null;
+                return;
+            }
             const imgData = ctx.getImageData(0, 0, w, h);
             const data = imgData.data;
 
@@ -1978,7 +2100,10 @@ const createAppInstance = () => createApp({
             const startB = data[startPos + 2];
             const startA = data[startPos + 3];
 
-            if (startR === r && startG === g && startB === b && startA === a) return;
+            if (startR === r && startG === g && startB === b && startA === a) {
+                pendingEdit = null;
+                return;
+            }
 
             const matchStart = (pos) => {
                 return data[pos] === startR && data[pos + 1] === startG && data[pos + 2] === startB && data[pos + 3] === startA;
@@ -1994,7 +2119,7 @@ const createAppInstance = () => createApp({
                 const [cx, cy] = stack.pop();
                 const pos = (cy * w + cx) * 4;
 
-                if (matchStart(pos)) {
+                if (insideSelection(cx, cy) && matchStart(pos)) {
                     data[pos] = r;
                     data[pos + 1] = g;
                     data[pos + 2] = b;
@@ -2034,7 +2159,7 @@ const createAppInstance = () => createApp({
                             [fx, fy + 1]
                         ];
                         for (const [nx, ny] of neighbors) {
-                            if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+                            if (nx < 0 || ny < 0 || nx >= w || ny >= h || !insideSelection(nx, ny)) continue;
                             const nIdx = ny * w + nx;
                             if (filledMask[nIdx]) continue;
                             filledMask[nIdx] = 1;
@@ -2050,6 +2175,132 @@ const createAppInstance = () => createApp({
         };
 
         // 4. Selection Logic
+        const hasSelectionShape = () => !!session.selection.active && (!!session.selection.floatingData || !!session.selection.rect || (session.selection.path && session.selection.path.length > 0));
+
+        const buildSelectionPath = (ctx, offsetX = 0, offsetY = 0) => {
+            ctx.beginPath();
+            if (session.selection.rect) {
+                ctx.rect(
+                    session.selection.rect.x + offsetX,
+                    session.selection.rect.y + offsetY,
+                    session.selection.rect.w,
+                    session.selection.rect.h
+                );
+                return true;
+            }
+            if (session.selection.path && session.selection.path.length > 0) {
+                session.selection.path.forEach((p, i) => {
+                    const px = p.x + offsetX;
+                    const py = p.y + offsetY;
+                    if (i === 0) ctx.moveTo(px, py);
+                    else ctx.lineTo(px, py);
+                });
+                ctx.closePath();
+                return true;
+            }
+            return false;
+        };
+
+        const applySelectionClip = (ctx) => {
+            if (!hasSelectionShape() || session.selection.floatingData) return;
+            if (buildSelectionPath(ctx)) ctx.clip();
+        };
+
+        const getSelectionMaskData = () => {
+            if (!hasSelectionShape() || session.selection.floatingData) return null;
+            const mask = makeSurface(project.meta.width, project.meta.height);
+            const mctx = mask.getContext('2d', { willReadFrequently: true });
+            mctx.fillStyle = '#000';
+            if (buildSelectionPath(mctx)) mctx.fill();
+            return mctx.getImageData(0, 0, project.meta.width, project.meta.height).data;
+        };
+
+        const getSelectionBounds = () => {
+            if (session.selection.rect) {
+                return {
+                    minX: session.selection.rect.x,
+                    minY: session.selection.rect.y,
+                    maxX: session.selection.rect.x + session.selection.rect.w,
+                    maxY: session.selection.rect.y + session.selection.rect.h
+                };
+            }
+            if (!session.selection.path || session.selection.path.length === 0) return null;
+            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+            session.selection.path.forEach(p => {
+                if (p.x < minX) minX = p.x;
+                if (p.x > maxX) maxX = p.x;
+                if (p.y < minY) minY = p.y;
+                if (p.y > maxY) maxY = p.y;
+            });
+            return { minX, minY, maxX, maxY };
+        };
+
+        const extractSelectionImage = () => {
+            if (!hasSelectionShape()) return null;
+            const ctx = getCtx(session.currentLayerId);
+            if (!ctx) return null;
+            const bounds = getSelectionBounds();
+            if (!bounds) return null;
+            const minX = Math.floor(Math.max(0, bounds.minX));
+            const minY = Math.floor(Math.max(0, bounds.minY));
+            const maxX = Math.ceil(Math.min(project.meta.width, bounds.maxX));
+            const maxY = Math.ceil(Math.min(project.meta.height, bounds.maxY));
+            const w = maxX - minX;
+            const h = maxY - minY;
+            if (w <= 0 || h <= 0) return null;
+
+            const imgData = ctx.getImageData(minX, minY, w, h);
+            const maskCanvas = document.createElement('canvas');
+            maskCanvas.width = w;
+            maskCanvas.height = h;
+            const maskCtx = maskCanvas.getContext('2d');
+            maskCtx.putImageData(imgData, 0, 0);
+            maskCtx.save();
+            maskCtx.globalCompositeOperation = 'destination-in';
+            maskCtx.translate(-minX, -minY);
+            maskCtx.fillStyle = '#000';
+            if (buildSelectionPath(maskCtx)) maskCtx.fill();
+            maskCtx.restore();
+            return {
+                data: maskCtx.getImageData(0, 0, w, h),
+                x: minX,
+                y: minY,
+                width: w,
+                height: h
+            };
+        };
+
+        const drawSelectionShape = (ctx) => {
+            if (!hasSelectionShape()) return;
+            if (session.selection.floatingData) {
+                if (session.selection.originPath) {
+                    ctx.beginPath();
+                    session.selection.originPath.forEach((p, i) => {
+                        const px = p.x + session.selection.floatingPos.x;
+                        const py = p.y + session.selection.floatingPos.y;
+                        if (i === 0) ctx.moveTo(px, py);
+                        else ctx.lineTo(px, py);
+                    });
+                    ctx.closePath();
+                    ctx.stroke();
+                } else if (session.selection.floatingData) {
+                    ctx.strokeRect(session.selection.floatingPos.x, session.selection.floatingPos.y, session.selection.floatingData.width, session.selection.floatingData.height);
+                }
+                return;
+            }
+            if (session.selection.rect) {
+                ctx.strokeRect(session.selection.rect.x, session.selection.rect.y, session.selection.rect.w, session.selection.rect.h);
+            } else {
+                ctx.beginPath();
+                session.selection.path.forEach((p, i) => {
+                    if (i === 0) ctx.moveTo(p.x, p.y);
+                    else ctx.lineTo(p.x, p.y);
+                });
+                ctx.closePath();
+                ctx.stroke();
+            }
+        };
+
         const renderSelectionOverlay = () => {
             const ctx = getTempCtx();
             if (!ctx) return;
@@ -2094,43 +2345,26 @@ const createAppInstance = () => createApp({
                 ctx.restore();
             }
 
-            // Draw Floating Selection
-            if (session.selection.active && session.selection.floatingData) {
-                if (session.selection.dirty) {
+            // Draw Active Selection
+            if (session.selection.active) {
+                if (session.selection.dirty && session.selection.floatingData) {
                     ctx.putImageData(session.selection.floatingData, session.selection.floatingPos.x, session.selection.floatingPos.y);
                 }
 
                 ctx.save();
-                const drawBorder = () => {
-                    if (session.selection.originPath) {
-                        // Draw lasso path
-                        ctx.beginPath();
-                        session.selection.originPath.forEach((p, i) => {
-                            const px = p.x + session.selection.floatingPos.x;
-                            const py = p.y + session.selection.floatingPos.y;
-                            if (i === 0) ctx.moveTo(px, py);
-                            else ctx.lineTo(px, py);
-                        });
-                        ctx.closePath();
-                        ctx.stroke();
-                    } else {
-                        // Draw rect
-                        ctx.strokeRect(session.selection.floatingPos.x, session.selection.floatingPos.y, session.selection.floatingData.width, session.selection.floatingData.height);
-                    }
-                };
 
                 // Solid white background line (1px thick on screen)
                 ctx.setLineDash([]);
                 ctx.strokeStyle = '#ffffff';
                 ctx.lineWidth = 1 / viewport.zoom;
-                drawBorder();
+                drawSelectionShape(ctx);
 
                 // Dashed black overlay line (1px thick on screen)
                 ctx.setLineDash([4 / viewport.zoom, 4 / viewport.zoom]);
                 ctx.strokeStyle = '#000000';
                 ctx.lineWidth = 1 / viewport.zoom;
                 ctx.lineDashOffset = -selectionDashOffset / viewport.zoom;
-                drawBorder();
+                drawSelectionShape(ctx);
 
                 ctx.restore();
             }
@@ -2144,7 +2378,7 @@ const createAppInstance = () => createApp({
             lastAnimateTime = timestamp;
 
             const isSelecting = session.isDrawing && session.tool.startsWith('select');
-            const hasActiveSelection = session.selection.active && session.selection.floatingData;
+            const hasActiveSelection = hasSelectionShape();
 
             if (isSelecting || hasActiveSelection) {
                 const isMoving = (session.tool === 'move' && session.isDrawing) || session.isPanning;
@@ -2178,7 +2412,7 @@ const createAppInstance = () => createApp({
                 return;
             }
 
-            recordHistory(); // Record before merging
+            if (!pendingEdit) recordHistory(); // Paste-only floats need their own history entry.
 
             const ctx = getCtx(session.currentLayerId);
             const tempCtx = getTempCtx();
@@ -2187,12 +2421,29 @@ const createAppInstance = () => createApp({
                 const bmp = await createImageBitmap(session.selection.floatingData);
                 ctx.drawImage(bmp, session.selection.floatingPos.x, session.selection.floatingPos.y);
 
-                // Clear state
-                session.selection.active = false;
+                const nextPos = { ...session.selection.floatingPos };
+                const nextRect = session.selection.originPath ? null : {
+                    x: nextPos.x,
+                    y: nextPos.y,
+                    w: session.selection.floatingData.width,
+                    h: session.selection.floatingData.height
+                };
+                const nextPath = session.selection.originPath ?
+                    session.selection.originPath.map(p => ({ x: p.x + nextPos.x, y: p.y + nextPos.y })) :
+                    [];
+
+                session.selection.active = true;
+                session.selection.path = nextPath;
+                session.selection.rect = nextRect;
                 session.selection.floatingData = null;
                 session.selection.originPath = null;
+                session.selection.floatingPos = nextPos;
+                session.selection.initialPos = null;
+                session.selection.dirty = false;
                 clearCanvas(tempCtx);
                 await saveCurrentLayerToState();
+                renderSelectionOverlay();
+                pendingMoveSelectionBefore = null;
             } catch (err) {
                 console.error('anchorSelection failed', err);
             }
@@ -2200,77 +2451,20 @@ const createAppInstance = () => createApp({
 
         const createFloatingLayer = () => {
             // Copy from current layer (Deferred Cut)
-            const ctx = getCtx(session.currentLayerId);
             const tempCtx = getTempCtx();
-
-            // Determine Bounds
-            let minX = Infinity,
-                minY = Infinity,
-                maxX = 0,
-                maxY = 0;
-
-            if (session.selection.rect) {
-                minX = session.selection.rect.x;
-                minY = session.selection.rect.y;
-                maxX = minX + session.selection.rect.w;
-                maxY = minY + session.selection.rect.h;
-            } else {
-                // Lasso bounds
-                session.selection.path.forEach(p => {
-                    if (p.x < minX) minX = p.x;
-                    if (p.x > maxX) maxX = p.x;
-                    if (p.y < minY) minY = p.y;
-                    if (p.y > maxY) maxY = p.y;
-                });
-            }
-
-            // Integer bounds
-            minX = Math.floor(Math.max(0, minX));
-            minY = Math.floor(Math.max(0, minY));
-            maxX = Math.ceil(Math.min(project.meta.width, maxX));
-            maxY = Math.ceil(Math.min(project.meta.height, maxY));
-            const w = maxX - minX;
-            const h = maxY - minY;
-
-            if (w <= 0 || h <= 0) return;
-
-            // Get Data
-            const imgData = ctx.getImageData(minX, minY, w, h);
-
-            // Mask the extracted image to the selection shape
-            const maskCanvas = document.createElement('canvas');
-            maskCanvas.width = w;
-            maskCanvas.height = h;
-            const maskCtx = maskCanvas.getContext('2d');
-            maskCtx.putImageData(imgData, 0, 0);
-            maskCtx.save();
-            maskCtx.globalCompositeOperation = 'destination-in';
-            maskCtx.beginPath();
-            if (session.selection.rect) {
-                maskCtx.rect(0, 0, w, h);
-            } else {
-                session.selection.path.forEach((p, i) => {
-                    const px = p.x - minX;
-                    const py = p.y - minY;
-                    if (i === 0) maskCtx.moveTo(px, py);
-                    else maskCtx.lineTo(px, py);
-                });
-                maskCtx.closePath();
-            }
-            maskCtx.fill();
-            maskCtx.restore();
-            const maskedData = maskCtx.getImageData(0, 0, w, h);
+            const extracted = extractSelectionImage();
+            if (!extracted) return;
 
             // Set Float State
-            session.selection.floatingData = maskedData;
+            session.selection.floatingData = extracted.data;
 
             session.selection.floatingPos = {
-                x: minX,
-                y: minY
+                x: extracted.x,
+                y: extracted.y
             };
             session.selection.initialPos = {
-                x: minX,
-                y: minY
+                x: extracted.x,
+                y: extracted.y
             };
             session.selection.active = true;
             session.selection.dirty = false;
@@ -2278,8 +2472,8 @@ const createAppInstance = () => createApp({
             // Save origin path relative to float pos if lasso
             if (!session.selection.rect && session.selection.path.length > 0) {
                 session.selection.originPath = session.selection.path.map(p => ({
-                    x: p.x - minX,
-                    y: p.y - minY
+                    x: p.x - extracted.x,
+                    y: p.y - extracted.y
                 }));
             } else {
                 session.selection.originPath = null;
@@ -2290,13 +2484,16 @@ const createAppInstance = () => createApp({
             renderSelectionOverlay();
         };
 
-        const ensureSelectionCut = () => {
+        const ensureSelectionCut = (selectionBefore = null) => {
             if (!session.selection.active || session.selection.dirty) return;
+            if (!session.selection.floatingData) createFloatingLayer();
+            if (!session.selection.floatingData) return;
 
             const ctx = getCtx(session.currentLayerId);
             if (!ctx) return;
 
             recordHistory(); // Record original state before cutting
+            if (selectionBefore && pendingEdit) pendingEdit.selection = selectionBefore;
 
             const startX = session.selection.initialPos.x;
             const startY = session.selection.initialPos.y;
@@ -2328,7 +2525,6 @@ const createAppInstance = () => createApp({
             ctx.restore();
 
             session.selection.dirty = true;
-            saveCurrentLayerToState();
         };
 
         // 5. Onion Skin Logic
@@ -2556,7 +2752,14 @@ const createAppInstance = () => createApp({
 
                 // Selection Tool Logic (Left click only)
                 if (!session.isRightClick && (session.tool === 'select-rect' || session.tool === 'select-lasso')) {
-                    if (session.selection.active) await anchorSelection(); // Anchor previous
+                    if (session.selection.floatingData) await anchorSelection(); // Anchor previous move
+                    pendingSelectionBefore = snapshotSelectionState();
+                    session.selection.active = false;
+                    session.selection.floatingData = null;
+                    session.selection.originPath = null;
+                    session.selection.rect = null;
+                    session.selection.initialPos = null;
+                    session.selection.dirty = false;
                     session.selection.path = [{
                         x,
                         y
@@ -2566,15 +2769,13 @@ const createAppInstance = () => createApp({
 
                 // Move Tool (Left click only)
                 if (!session.isRightClick && session.tool === 'move') {
-                    if (session.selection.active) {
-                        ensureSelectionCut();
-                    }
+                    pendingMoveSelectionBefore = null;
                     return;
                 }
 
                 // Drawing Tools
                 if (session.tool === 'bucket' && !session.isRightClick) {
-                    if (session.selection.active) await anchorSelection();
+                    if (session.selection.floatingData) await anchorSelection();
                     floodFill(Math.floor(x), Math.floor(y), session.colors.primary);
                     session.isDrawing = false;
                     return;
@@ -2597,7 +2798,7 @@ const createAppInstance = () => createApp({
 
                 // Pen/Eraser
                 // Float layer anchor if drawing outside? Yes.
-                if (session.selection.active) await anchorSelection();
+                if (session.selection.floatingData) await anchorSelection();
 
                 pendingStroke = { x, y, pressure: e.pressure };
                 scheduleSmoothingTick();
@@ -2662,7 +2863,8 @@ const createAppInstance = () => createApp({
                     clearCanvas(tempCtx);
                     renderSelectionOverlay();
                 } else if (session.tool === 'move' && session.selection.active && !session.isRightClick) {
-                    ensureSelectionCut();
+                    if (!pendingMoveSelectionBefore) pendingMoveSelectionBefore = snapshotSelectionState();
+                    ensureSelectionCut(pendingMoveSelectionBefore);
                     const dx = x - lastPoint.x;
                     const dy = y - lastPoint.y;
                     session.selection.floatingPos.x += dx;
@@ -2739,26 +2941,51 @@ const createAppInstance = () => createApp({
                             w: Math.abs(w),
                             h: Math.abs(h)
                         };
-                        createFloatingLayer(); // Immediately cut and float
+                        session.selection.active = true;
+                        session.selection.floatingData = null;
+                        session.selection.originPath = null;
+                        session.selection.initialPos = null;
+                        session.selection.dirty = false;
+                        clearCanvas(getTempCtx());
+                        renderSelectionOverlay();
+                        recordSelectionHistory(pendingSelectionBefore, snapshotSelectionState());
                     } else {
                         session.selection.path = [];
+                        recordSelectionHistory(pendingSelectionBefore, snapshotSelectionState());
                     }
+                    pendingSelectionBefore = null;
                 } else if (session.tool === 'select-lasso') {
                     if (session.selection.path.length > 5) {
                         session.selection.rect = null; // Is lasso
-                        createFloatingLayer();
+                        session.selection.active = true;
+                        session.selection.floatingData = null;
+                        session.selection.originPath = null;
+                        session.selection.initialPos = null;
+                        session.selection.dirty = false;
+                        clearCanvas(getTempCtx());
+                        renderSelectionOverlay();
+                        recordSelectionHistory(pendingSelectionBefore, snapshotSelectionState());
+                    } else {
+                        session.selection.path = [];
+                        recordSelectionHistory(pendingSelectionBefore, snapshotSelectionState());
                     }
+                    pendingSelectionBefore = null;
+                } else if (session.tool === 'move' && pendingMoveSelectionBefore) {
+                    pendingMoveSelectionBefore = null;
                 } else if (['pen', 'eraser'].includes(session.tool) || wasRightClick) { // Also save on right click finish
                     const pos = forcePos ? forcePos : getPointerPos(e);
                     const ctx = getCtx(session.currentLayerId);
                     if (ctx && pos) {
                         // Ensure final segment reaches pointer position even when smoothing is strong
+                        ctx.save();
+                        applySelectionClip(ctx);
                         ctx.lineCap = 'round';
                         ctx.lineJoin = 'round';
                         ctx.strokeStyle = session.colors.primary;
                         const size = (session.tool === 'eraser' || wasRightClick) ? session.brush.eraserSize : session.brush.penSize;
                         const p = settings.pressureSensitivity ? (e.pressure || 0.5) : 0.5;
-                        ctx.lineWidth = size * (p + 0.5);
+                        const strokeWidth = size * (p + 0.5);
+                        ctx.lineWidth = strokeWidth;
                         ctx.globalCompositeOperation = (session.tool === 'eraser' || wasRightClick) ? 'destination-out' : 'source-over';
 
                         let dabPts;
@@ -2775,8 +3002,9 @@ const createAppInstance = () => createApp({
                             ctx.stroke();
                             dabPts = [lastPoint, pos];
                         }
+                        ctx.restore();
                         // Track this final segment too (it is drawn directly, not via drawStroke).
-                        const half = ctx.lineWidth / 2 + 2;
+                        const half = strokeWidth / 2 + 2;
                         const xs = dabPts.map(p => p.x), ys = dabPts.map(p => p.y);
                         const minX = Math.min(...xs), minY = Math.min(...ys);
                         expandDirty(session.currentLayerId, {
@@ -2829,6 +3057,7 @@ const createAppInstance = () => createApp({
                     x: 0,
                     y: 0
                 };
+                session.selection.initialPos = null;
                 session.selection.dirty = false;
                 ensureFrame(0);
                 await actions.addFrame(false);
@@ -2881,7 +3110,7 @@ const createAppInstance = () => createApp({
 
             async gotoFrame(idx) {
                 if (session.isPlaying) return;
-                if (session.selection.active) await anchorSelection();
+                if (session.selection.floatingData) await anchorSelection();
                 if (idx < 0 || idx >= project.frames.length) return;
                 session.currentFrameIndex = idx;
                 ensureFrame(idx);
@@ -2901,7 +3130,7 @@ const createAppInstance = () => createApp({
                     session.isPlaying = false;
                     updateHistoryState(); // playback may have landed on a different frame
                 } else {
-                    if (session.selection.active) await anchorSelection();
+                    if (session.selection.floatingData) await anchorSelection();
                     session.isPlaying = true;
                     playLoop();
                 }
@@ -3094,6 +3323,17 @@ const createAppInstance = () => createApp({
                         x: session.selection.floatingPos.x,
                         y: session.selection.floatingPos.y
                     };
+                } else if (session.selection.active) {
+                    const extracted = extractSelectionImage();
+                    if (!extracted) return;
+                    session.clipboard = {
+                        type: 'image',
+                        data: extracted.data,
+                        width: extracted.width,
+                        height: extracted.height,
+                        x: extracted.x,
+                        y: extracted.y
+                    };
                 } else {
                     // Copy entire current layer
                     const ctx = getCtx(session.currentLayerId);
@@ -3115,6 +3355,8 @@ const createAppInstance = () => createApp({
                 if (!session.selection.active) return;
                 
                 recordHistory(); // Save state BEFORE cut (restores selection on Undo)
+                if (!session.selection.floatingData) createFloatingLayer();
+                if (!session.selection.floatingData) return;
                 
                 actions.copy();
 
@@ -3163,6 +3405,7 @@ const createAppInstance = () => createApp({
 
                 // If selection active, anchor it first
                 await commitFloatingSelection();
+                const selectionBefore = snapshotSelectionState();
 
                 // No pixels are committed yet — the paste is a floating selection; the
                 // eventual anchor records the region-diff. (Ctrl+Z clears the float first.)
@@ -3197,6 +3440,7 @@ const createAppInstance = () => createApp({
                 
                 await setTool('move');
                 renderSelectionOverlay();
+                recordSelectionHistory(selectionBefore, snapshotSelectionState());
             },
 
             async flipFrame(direction = 'horizontal') {
@@ -3307,6 +3551,7 @@ const createAppInstance = () => createApp({
 
             clearSelection() {
                 if (!session.selection.active) return;
+                const selectionBefore = snapshotSelectionState();
                 session.selection.active = false;
                 session.selection.floatingData = null;
                 session.selection.path = [];
@@ -3316,8 +3561,10 @@ const createAppInstance = () => createApp({
                     x: 0,
                     y: 0
                 };
+                session.selection.initialPos = null;
+                session.selection.dirty = false;
                 clearCanvas(getTempCtx());
-                saveCurrentLayerToState();
+                recordSelectionHistory(selectionBefore, snapshotSelectionState());
             },
 
             async confirmNewProject() {
@@ -3635,7 +3882,7 @@ const createAppInstance = () => createApp({
         };
 
         const setTool = async (t) => {
-            if (session.selection.active && t !== 'move') await anchorSelection();
+            if (session.selection.floatingData && t !== 'move') await anchorSelection();
 
             if (t === 'eyedropper') {
                 const previousTool = session.tool === 'eyedropper' ? lastNonEyedropperTool : session.tool;
@@ -3857,11 +4104,10 @@ const createAppInstance = () => createApp({
                         if (e.ctrlKey || e.metaKey) {
                             e.preventDefault();
                             if (e.shiftKey) {
-																redo();
-                            }else {
-																if (session.activeScope === "canvas") actions.clearSelection();
-																undo();
-														}
+																	redo();
+	                            }else {
+																	undo();
+															}
                         }
                         break;
                     case 'y':
