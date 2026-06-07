@@ -2068,6 +2068,20 @@ const createAppInstance = () => createApp({
             };
         };
 
+        const flushSmoothingToPointer = (e) => {
+            if (!session.isDrawing || !(['pen', 'eraser'].includes(session.tool) || session.isRightClick)) return;
+            const ctx = getCtx(session.currentLayerId);
+            if (!ctx) return;
+            const pos = getPointerPos(e);
+            pendingStroke = { x: pos.x, y: pos.y, pressure: e.pressure || 0.5 };
+            if (smoothingRaf !== null) {
+                cancelAnimationFrame(smoothingRaf);
+                smoothingRaf = null;
+            }
+            drawStroke(ctx, pos.x, pos.y, pendingStroke.pressure, BASE_FRAME_SEC * 120);
+            lastStrokeTime = performance.now();
+        };
+
         // 3. Flood Fill Algorithm (Stack-based)
         const floodFill = (startX, startY, fillColor) => {
             const ctx = getCtx(session.currentLayerId);
@@ -2805,7 +2819,7 @@ const createAppInstance = () => createApp({
             },
 
             pointerMove: (e) => {
-                if (session.isDrawing && e.buttons === 0) {
+                if (session.isDrawing && e.pointerType !== 'pen' && e.buttons === 0) {
                     // Button released outside; finish using last smoothed/known point to avoid drawing at re-entry location.
                     const fallbackPos = smoothedPoint || lastPoint || pendingStroke;
                     handlers.pointerUp(e, { forcePos: fallbackPos });
@@ -2892,14 +2906,8 @@ const createAppInstance = () => createApp({
             },
 
             pointerLeave: (e) => {
-                lastCursorPos = null;
-                const tempCtx = getTempCtx();
-                if (tempCtx) {
-                    clearCanvas(tempCtx);
-                    if (session.selection.active) {
-                        renderSelectionOverlay();
-                    }
-                }
+                flushSmoothingToPointer(e);
+                clearBrushPreview();
             },
 
             pointerUp: (e, opts = {}) => {
@@ -3029,6 +3037,26 @@ const createAppInstance = () => createApp({
             if (!session.isDrawing) return;
             const fallbackPos = smoothedPoint || lastPoint || pendingStroke;
             handlers.pointerUp(e, { forcePos: fallbackPos });
+        };
+
+        const handleGlobalPointerMove = (e) => {
+            if ((!session.isDrawing && !session.isPanning) || e.pointerId !== session.activePointerId) return;
+            if (e.target === canvasTemp.value) return;
+            handlers.pointerMove(e);
+        };
+
+        const clearBrushPreview = () => {
+            lastCursorPos = null;
+            const tempCtx = getTempCtx();
+            if (!tempCtx) return;
+            clearCanvas(tempCtx);
+            if (session.selection.active) renderSelectionOverlay();
+        };
+
+        const handleViewportPointerExit = (e) => {
+            if (e.relatedTarget !== null) return;
+            flushSmoothingToPointer(e);
+            clearBrushPreview();
         };
 
         // --- Actions ---
@@ -4216,6 +4244,9 @@ const createAppInstance = () => createApp({
 
             window.addEventListener('pointerup', handleGlobalPointerRelease);
             window.addEventListener('pointercancel', handleGlobalPointerRelease);
+            window.addEventListener('pointermove', handleGlobalPointerMove);
+            window.addEventListener('pointerout', handleViewportPointerExit);
+            window.addEventListener('blur', clearBrushPreview);
 
             // Multi-touch Zoom (Pinch) & Pan (Two-finger scroll) for iPad / Tablet compatibility
             const activePointers = new Map();
