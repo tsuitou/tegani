@@ -4221,7 +4221,8 @@ const createAppInstance = () => createApp({
             const activePointers = new Map();
 
             window.addEventListener('pointerdown', (e) => {
-                if (workspaceRef.value && workspaceRef.value.contains(e.target)) {
+                if (e.pointerType === 'touch' && workspaceRef.value && workspaceRef.value.contains(e.target)) {
+                    if (session.isDrawing && e.pointerId !== session.activePointerId) return;
                     activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
 
                     if (activePointers.size >= 2) {
@@ -4242,6 +4243,7 @@ const createAppInstance = () => createApp({
             });
 
             window.addEventListener('pointermove', (e) => {
+                if (e.pointerType !== 'touch') return;
                 if (activePointers.has(e.pointerId)) {
                     activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
 
@@ -4282,6 +4284,7 @@ const createAppInstance = () => createApp({
             });
 
             const handlePointerUpOrCancel = (e) => {
+                if (e.pointerType !== 'touch') return;
                 if (activePointers.has(e.pointerId)) {
                     activePointers.delete(e.pointerId);
                     viewport.lastTouchDist = undefined;
