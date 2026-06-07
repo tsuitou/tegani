@@ -1811,6 +1811,14 @@ const createAppInstance = () => createApp({
             scheduleThumbnail(frame);
         };
 
+        const saveCurrentLayerToStateWithoutHistory = () => {
+            ensureFrame(session.currentFrameIndex);
+            const frame = currentFrame.value;
+            if (!frame) return;
+            flushFrameCells(frame);
+            scheduleThumbnail(frame);
+        };
+
         // --- History Management ---
         const resetInteractionState = () => {
             session.isDrawing = false;
@@ -3493,7 +3501,7 @@ const createAppInstance = () => createApp({
                     ctx.restore();
                 }
 
-                saveCurrentLayerToState();
+                saveCurrentLayerToStateWithoutHistory();
             },
 
             // --- Drag & Drop Frames ---
