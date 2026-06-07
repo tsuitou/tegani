@@ -2819,7 +2819,7 @@ const createAppInstance = () => createApp({
             },
 
             pointerMove: (e) => {
-                if (session.isDrawing && e.pointerType !== 'pen' && e.buttons === 0) {
+                if (session.isDrawing && e.buttons === 0) {
                     // Button released outside; finish using last smoothed/known point to avoid drawing at re-entry location.
                     const fallbackPos = smoothedPoint || lastPoint || pendingStroke;
                     handlers.pointerUp(e, { forcePos: fallbackPos });
@@ -3035,14 +3035,9 @@ const createAppInstance = () => createApp({
         // Ensure drawing ends even if the pointer is released outside the canvas
         const handleGlobalPointerRelease = (e) => {
             if (!session.isDrawing) return;
+            flushSmoothingToPointer(e);
             const fallbackPos = smoothedPoint || lastPoint || pendingStroke;
             handlers.pointerUp(e, { forcePos: fallbackPos });
-        };
-
-        const handleGlobalPointerMove = (e) => {
-            if ((!session.isDrawing && !session.isPanning) || e.pointerId !== session.activePointerId) return;
-            if (e.target === canvasTemp.value) return;
-            handlers.pointerMove(e);
         };
 
         const clearBrushPreview = () => {
@@ -4244,7 +4239,6 @@ const createAppInstance = () => createApp({
 
             window.addEventListener('pointerup', handleGlobalPointerRelease);
             window.addEventListener('pointercancel', handleGlobalPointerRelease);
-            window.addEventListener('pointermove', handleGlobalPointerMove);
             window.addEventListener('pointerout', handleViewportPointerExit);
             window.addEventListener('blur', clearBrushPreview);
 
