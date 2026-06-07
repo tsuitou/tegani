@@ -1235,6 +1235,49 @@ const createAppInstance = () => createApp({
             }
             return out;
         };
+        const flipImageData = (img, flipX, flipY) => {
+            if (!flipX && !flipY) return img;
+            const out = new ImageData(img.width, img.height);
+            const src = img.data, dst = out.data;
+            for (let y = 0; y < img.height; y++) {
+                for (let x = 0; x < img.width; x++) {
+                    const sx = flipX ? img.width - 1 - x : x;
+                    const sy = flipY ? img.height - 1 - y : y;
+                    const si = (sy * img.width + sx) * 4;
+                    const di = (y * img.width + x) * 4;
+                    dst[di] = src[si];
+                    dst[di + 1] = src[si + 1];
+                    dst[di + 2] = src[si + 2];
+                    dst[di + 3] = src[si + 3];
+                }
+            }
+            return out;
+        };
+        const flipBBox = (bbox, canvasW, canvasH, flipX, flipY) => ({
+            x: flipX ? canvasW - bbox.x - bbox.w : bbox.x,
+            y: flipY ? canvasH - bbox.y - bbox.h : bbox.y,
+            w: bbox.w,
+            h: bbox.h
+        });
+        const transformPixelHistoryForFlip = (frameId, flipX, flipY) => {
+            if (!flipX && !flipY) return;
+            const ch = canvasHistories.get(frameId);
+            if (!ch) return;
+            const w = project.meta.width;
+            const h = project.meta.height;
+            const transformStack = (stack) => {
+                for (const entry of stack) {
+                    if (entry.type !== 'pixel' || entry.frameId !== frameId) continue;
+                    entry.patches = entry.patches.map(p => ({
+                        ...p,
+                        bbox: flipBBox(p.bbox, w, h, flipX, flipY),
+                        data: flipImageData(p.data, flipX, flipY)
+                    }));
+                }
+            };
+            transformStack(ch.undo);
+            transformStack(ch.redo);
+        };
 
         const trimStack = (stack) => {
             const limit = getUndoLimit();
@@ -3501,6 +3544,7 @@ const createAppInstance = () => createApp({
                     ctx.restore();
                 }
 
+                transformPixelHistoryForFlip(frame.id, flipX, flipY);
                 saveCurrentLayerToStateWithoutHistory();
             },
 
