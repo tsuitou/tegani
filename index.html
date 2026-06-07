@@ -3477,10 +3477,6 @@ const createAppInstance = () => createApp({
                 const flipX = direction === 'horizontal' || direction === 'both';
                 const flipY = direction === 'vertical' || direction === 'both';
 
-                // Flip is a pixel edit across all layers -> begin/commit captures the diff.
-                const layerIds = drawingLayers.value.map(l => l.id);
-                recordHistory(layerIds);
-
                 for (const layer of drawingLayers.value) {
                     const ctx = getCtx(layer.id);
                     const cvs = canvasRefs.value[layer.id];
